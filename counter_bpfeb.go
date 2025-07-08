@@ -61,6 +61,7 @@ type counterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type counterMapSpecs struct {
+	Ringbuf *ebpf.MapSpec `ebpf:"ringbuf"`
 }
 
 // counterVariableSpecs contains global variables before they are loaded into the kernel.
@@ -69,7 +70,6 @@ type counterMapSpecs struct {
 type counterVariableSpecs struct {
 	Blockme *ebpf.VariableSpec `ebpf:"blockme"`
 	Pid     *ebpf.VariableSpec `ebpf:"pid"`
-	UserPtr *ebpf.VariableSpec `ebpf:"user_ptr"`
 }
 
 // counterObjects contains all objects after they have been loaded into the kernel.
@@ -92,10 +92,13 @@ func (o *counterObjects) Close() error {
 //
 // It can be passed to loadCounterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type counterMaps struct {
+	Ringbuf *ebpf.Map `ebpf:"ringbuf"`
 }
 
 func (m *counterMaps) Close() error {
-	return _CounterClose()
+	return _CounterClose(
+		m.Ringbuf,
+	)
 }
 
 // counterVariables contains all global variables after they have been loaded into the kernel.
@@ -104,7 +107,6 @@ func (m *counterMaps) Close() error {
 type counterVariables struct {
 	Blockme *ebpf.Variable `ebpf:"blockme"`
 	Pid     *ebpf.Variable `ebpf:"pid"`
-	UserPtr *ebpf.Variable `ebpf:"user_ptr"`
 }
 
 // counterPrograms contains all programs after they have been loaded into the kernel.

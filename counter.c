@@ -12,8 +12,22 @@ char LICENSE[] SEC("license") = "GPL";
 const __u32 blockme = 0x01010101; // 1.1.1.1 -> int
 
 s32 pid;
-void *user_ptr;
+// void *user_ptr;
 // __u64 user_ptr;
+
+// struct {
+//     __uint(type, BPF_MAP_TYPE_HASH);
+//     __uint(max_entries, 1024);
+//     __type(key, u32);
+//     __type(value, struct file *);
+// } file_map SEC(".maps");
+
+// struct file *global_file;
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 4096);
+} ringbuf SEC(".maps");
 
 SEC("lsm.s/socket_connect")
 int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret) {
@@ -39,11 +53,23 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
         bpf_printk("lsm: task not found");
         return -EPERM;
     }
-    bpf_printk("lsm: task found for pid=%d", pid);
-    __u8 buf[4];
-    // void *user_ptr = (void *)0x100000;
-    long err = bpf_copy_from_user_task(buf, 4, user_ptr, task, 0);
-    bpf_printk("lsm: user_ptr=0x%llx, buf=%d,%d,%d,%d err=%d", (__u64)user_ptr, buf[0], buf[1], buf[2], buf[3], err);
+    struct file *file = bpf_get_task_exe_file(task);
+    if (!file) {
+        bpf_printk("lsm: file not found");
+        bpf_task_release(task);
+        return -EPERM;
+    }
+    bpf_printk("lsm: file found %p", file);
+
+    struct bpf_dynptr dynp;
+    bpf_ringbuf_reserve_dynptr(&ringbuf, 64, 0, &dynp);
+    for (int i = 0; i < 10; i++) {
+        int err = bpf_get_file_xattr(file, "user.myattr", &dynp);
+        bpf_printk("xattr err=%d", err);
+    }
+
+    bpf_ringbuf_discard_dynptr(&dynp, 0);
+    bpf_put_file(file);
     bpf_task_release(task);
 
     if (dest == blockme) {
@@ -52,3 +78,10 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     }
     return 0;
 }
+
+// SEC("lsm/socket_connect")
+// int BPF_PROG(lsm_file_open, struct file *file) {
+//     global_file = file;
+//     bpf_printk("lsm: file opened %p", file);
+//     return 0;
+// }

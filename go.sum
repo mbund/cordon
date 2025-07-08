@@ -1,5 +1,7 @@
 github.com/cilium/ebpf v0.19.0 h1:Ro/rE64RmFBeA9FGjcTc+KmCeY6jXmryu6FfnzPRIao=
 github.com/cilium/ebpf v0.19.0/go.mod h1:fLCgMo3l8tZmAdM3B2XqdFzXBpwkcSTroaVqN08OWVY=
+github.com/hanwen/go-fuse/v2 v2.8.0 h1:wV8rG7rmCz8XHSOwBZhG5YcVqcYjkzivjmbaMafPlAs=
+github.com/hanwen/go-fuse/v2 v2.8.0/go.mod h1:yE6D2PqWwm3CbYRxFXV9xUd8Md5d6NG0WBs5spCswmI=
 github.com/loopholelabs/userfaultfd-go v0.1.2 h1:HwXFNoQ+/eWNgYIcIyrqn54gDVVJk+TmszYxMGnJVu4=
 github.com/loopholelabs/userfaultfd-go v0.1.2/go.mod h1:6+5c50Ji7MUXuWUSrPUhAttECwmEeLAmR33FlP7Fn4o=
 golang.org/x/sys v0.31.0 h1:ioabZlmFYtWhL+TRYpcnNlLwhyxaM9kWTDEmfnprqik=
