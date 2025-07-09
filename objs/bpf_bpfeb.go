@@ -8,9 +8,19 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type BpfCounter struct {
+	_    structs.HostLayout
+	Lock struct {
+		_   structs.HostLayout
+		Val uint32
+	}
+	Next uint32
+}
 
 // LoadBpf returns the embedded CollectionSpec for Bpf.
 func LoadBpf() (*ebpf.CollectionSpec, error) {
@@ -61,7 +71,9 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	Ringbuf *ebpf.MapSpec `ebpf:"ringbuf"`
+	CounterMap      *ebpf.MapSpec `ebpf:"counter_map"`
+	DynamicSleepMap *ebpf.MapSpec `ebpf:"dynamic_sleep_map"`
+	Ringbuf         *ebpf.MapSpec `ebpf:"ringbuf"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -92,11 +104,15 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	Ringbuf *ebpf.Map `ebpf:"ringbuf"`
+	CounterMap      *ebpf.Map `ebpf:"counter_map"`
+	DynamicSleepMap *ebpf.Map `ebpf:"dynamic_sleep_map"`
+	Ringbuf         *ebpf.Map `ebpf:"ringbuf"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.CounterMap,
+		m.DynamicSleepMap,
 		m.Ringbuf,
 	)
 }

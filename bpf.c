@@ -4,6 +4,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include "ring.c"
+
 char LICENSE[] SEC("license") = "GPL";
 
 #define EPERM 1
@@ -41,6 +43,40 @@ static __always_inline int __sleep_internal(const char *xattr) {
 
 #define SLEEP(ms) __sleep_internal("user.sleep." #ms)
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64); // duration in ms
+    __uint(max_entries, NUM_RINGS);
+} dynamic_sleep_map SEC(".maps");
+
+static __always_inline int dynamic_sleep(__u32 milliseconds) {
+    struct task_struct *task = bpf_task_from_pid(pid);
+    if (!task) {
+        return -1;
+    }
+
+    struct file *file = bpf_get_task_exe_file(task);
+    if (!file) {
+        bpf_task_release(task);
+        return -1;
+    }
+
+    struct bpf_dynptr dynp;
+    bpf_ringbuf_reserve_dynptr(&ringbuf, 64, 0, &dynp);
+
+    bpf_printk("millseconds=%u", milliseconds);
+    __u32 n = next_n();
+    bpf_map_update_elem(&dynamic_sleep_map, &n, &milliseconds, BPF_ANY);
+
+    int err = bpf_get_file_xattr(file, get_dynamic_attr(n), &dynp);
+
+    bpf_ringbuf_discard_dynptr(&dynp, 0);
+    bpf_put_file(file);
+    bpf_task_release(task);
+    return err;
+}
+
 SEC("lsm.s/socket_connect")
 int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret) {
     // Satisfying "cannot override a denial" rule
@@ -60,7 +96,8 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     __u32 dest = addr->sin_addr.s_addr;
     bpf_printk("lsm: found connect to %d", dest);
 
-    SLEEP(5000);
+    dynamic_sleep(bpf_get_prandom_u32() % 4000 + 1000);
+    // SLEEP(5000);
 
     if (dest == blockme) {
         bpf_printk("lsm: blocking %d", dest);

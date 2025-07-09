@@ -180,6 +180,7 @@ var _ = (fs.NodeGetxattrer)((*ExecFile)(nil))
 func (f *ExecFile) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	slog.Info("Getxattr", "attr", attr)
 	segments := strings.Split(attr, ".")
+
 	if len(segments) == 3 && segments[0] == "user" && segments[1] == "sleep" {
 		duration, err := strconv.Atoi(segments[2])
 		if err == nil {
@@ -187,6 +188,23 @@ func (f *ExecFile) Getxattr(ctx context.Context, attr string, dest []byte) (uint
 			time.Sleep(time.Duration(duration) * time.Millisecond)
 		} else {
 			slog.Error("Failed to parse sleep duration", "attr", attr, "err", err)
+		}
+	}
+
+	if len(segments) == 3 && segments[0] == "user" && segments[1] == "ring" {
+		idx, err := strconv.Atoi(segments[2])
+		if err == nil {
+			slog.Info("Sarching map", "idx", idx)
+			var milliseconds uint64
+			err = bpfObjs.DynamicSleepMap.Lookup(uint32(idx), &milliseconds)
+			if err == nil {
+				slog.Info("Found value in map", "idx", idx, "value", milliseconds)
+				time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+			} else {
+				slog.Error("Failed to lookup in map", "idx", idx, "err", err)
+			}
+		} else {
+			slog.Error("Failed to parse idx", "attr", attr, "err", err)
 		}
 	}
 

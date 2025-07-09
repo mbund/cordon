@@ -55,6 +55,8 @@ func sleeper() {
 	select {}
 }
 
+var bpfObjs objs.BpfObjects
+
 func daemon() int {
 	slog.Info("Starting cordon daemon")
 
@@ -107,7 +109,7 @@ func daemon() int {
 		return 1
 	}
 
-	slog.Info("Creating FUSE fs", "path", fuseDirectory)
+	slog.Info("Creating FUSE", "path", fuseDirectory)
 
 	root := &ExecFS{
 		backingDir: backingDirectory,
@@ -123,7 +125,7 @@ func daemon() int {
 
 	server, err := fs.Mount(fuseDirectory, root, opts)
 	if err != nil {
-		slog.Error("Failed to mount filesystem", "err", err)
+		slog.Error("Failed to mount FUSE", "err", err)
 		return 1
 	}
 
@@ -136,14 +138,14 @@ func daemon() int {
 			if err == nil || ms > 5000 {
 				break
 			}
-			slog.Warn("Did not unmount filesystem, retrying", "after_ms", ms)
+			slog.Warn("Did not unmount FUSE, retrying", "after_ms", ms)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
 		if err != nil {
-			slog.Error("Failed to unmount filesystem", "err", err)
+			slog.Error("Failed to unmount FUSE", "err", err)
 		} else {
-			slog.Info("Unmounted FUSE filesystem", "path", fuseDirectory)
+			slog.Info("Unmounted FUSE", "path", fuseDirectory)
 		}
 	}()
 
@@ -163,7 +165,6 @@ func daemon() int {
 		}
 	}()
 
-	var bpfObjs objs.BpfObjects
 	if err := objs.LoadBpfObjects(&bpfObjs, nil); err != nil {
 		slog.Error("Failed to load eBPF objects", "err", err)
 		return 1
