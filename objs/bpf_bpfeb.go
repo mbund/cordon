@@ -13,6 +13,19 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type BpfConnectRequest struct {
+	_     structs.HostLayout
+	Daddr uint32
+	Dport uint16
+	_     [2]byte
+}
+
+type BpfConnectResponse struct {
+	_       structs.HostLayout
+	String  [16]int8
+	Verdict bool
+}
+
 type BpfCounter struct {
 	_    structs.HostLayout
 	Lock struct {
@@ -71,9 +84,15 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	CounterMap      *ebpf.MapSpec `ebpf:"counter_map"`
-	DynamicSleepMap *ebpf.MapSpec `ebpf:"dynamic_sleep_map"`
-	Ringbuf         *ebpf.MapSpec `ebpf:"ringbuf"`
+	CounterMapConnect    *ebpf.MapSpec `ebpf:"counter_map_connect"`
+	CounterMapMirror     *ebpf.MapSpec `ebpf:"counter_map_mirror"`
+	CounterMapSleep      *ebpf.MapSpec `ebpf:"counter_map_sleep"`
+	RequestArrayConnect  *ebpf.MapSpec `ebpf:"request_array_connect"`
+	RequestArrayMirror   *ebpf.MapSpec `ebpf:"request_array_mirror"`
+	RequestArraySleep    *ebpf.MapSpec `ebpf:"request_array_sleep"`
+	ResponseArrayConnect *ebpf.MapSpec `ebpf:"response_array_connect"`
+	ResponseArrayMirror  *ebpf.MapSpec `ebpf:"response_array_mirror"`
+	ResponseArraySleep   *ebpf.MapSpec `ebpf:"response_array_sleep"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -104,16 +123,28 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	CounterMap      *ebpf.Map `ebpf:"counter_map"`
-	DynamicSleepMap *ebpf.Map `ebpf:"dynamic_sleep_map"`
-	Ringbuf         *ebpf.Map `ebpf:"ringbuf"`
+	CounterMapConnect    *ebpf.Map `ebpf:"counter_map_connect"`
+	CounterMapMirror     *ebpf.Map `ebpf:"counter_map_mirror"`
+	CounterMapSleep      *ebpf.Map `ebpf:"counter_map_sleep"`
+	RequestArrayConnect  *ebpf.Map `ebpf:"request_array_connect"`
+	RequestArrayMirror   *ebpf.Map `ebpf:"request_array_mirror"`
+	RequestArraySleep    *ebpf.Map `ebpf:"request_array_sleep"`
+	ResponseArrayConnect *ebpf.Map `ebpf:"response_array_connect"`
+	ResponseArrayMirror  *ebpf.Map `ebpf:"response_array_mirror"`
+	ResponseArraySleep   *ebpf.Map `ebpf:"response_array_sleep"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
-		m.CounterMap,
-		m.DynamicSleepMap,
-		m.Ringbuf,
+		m.CounterMapConnect,
+		m.CounterMapMirror,
+		m.CounterMapSleep,
+		m.RequestArrayConnect,
+		m.RequestArrayMirror,
+		m.RequestArraySleep,
+		m.ResponseArrayConnect,
+		m.ResponseArrayMirror,
+		m.ResponseArraySleep,
 	)
 }
 

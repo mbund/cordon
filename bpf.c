@@ -4,7 +4,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-#include "ring.c"
+#include "userspace_helper.c"
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -13,69 +13,19 @@ char LICENSE[] SEC("license") = "GPL";
 
 const __u32 blockme = 0x01010101; // 1.1.1.1 -> int
 
-s32 pid;
+struct connect_request {
+    __be32 daddr;
+    __be16 dport;
+};
+struct connect_response {
+    char string[16];
+    bool verdict;
+};
+DEFINE_USERSPACE(connect, struct connect_request, struct connect_response)
 
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 4096);
-} ringbuf SEC(".maps");
+DEFINE_USERSPACE(sleep, __u32, __u32)
 
-static __always_inline int __sleep_internal(const char *xattr) {
-    struct task_struct *task = bpf_task_from_pid(pid);
-    if (!task) {
-        return -1;
-    }
-
-    struct file *file = bpf_get_task_exe_file(task);
-    if (!file) {
-        bpf_task_release(task);
-        return -1;
-    }
-
-    struct bpf_dynptr dynp;
-    bpf_ringbuf_reserve_dynptr(&ringbuf, 64, 0, &dynp);
-    int err = bpf_get_file_xattr(file, xattr, &dynp);
-    bpf_ringbuf_discard_dynptr(&dynp, 0);
-    bpf_put_file(file);
-    bpf_task_release(task);
-    return err;
-}
-
-#define SLEEP(ms) __sleep_internal("user.sleep." #ms)
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __u64); // duration in ms
-    __uint(max_entries, NUM_RINGS);
-} dynamic_sleep_map SEC(".maps");
-
-static __always_inline int dynamic_sleep(__u32 milliseconds) {
-    struct task_struct *task = bpf_task_from_pid(pid);
-    if (!task) {
-        return -1;
-    }
-
-    struct file *file = bpf_get_task_exe_file(task);
-    if (!file) {
-        bpf_task_release(task);
-        return -1;
-    }
-
-    struct bpf_dynptr dynp;
-    bpf_ringbuf_reserve_dynptr(&ringbuf, 64, 0, &dynp);
-
-    bpf_printk("millseconds=%u", milliseconds);
-    __u32 n = next_n();
-    bpf_map_update_elem(&dynamic_sleep_map, &n, &milliseconds, BPF_ANY);
-
-    int err = bpf_get_file_xattr(file, get_dynamic_attr(n), &dynp);
-
-    bpf_ringbuf_discard_dynptr(&dynp, 0);
-    bpf_put_file(file);
-    bpf_task_release(task);
-    return err;
-}
+DEFINE_USERSPACE(mirror, __u32, __u32)
 
 SEC("lsm.s/socket_connect")
 int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret) {
@@ -94,10 +44,20 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
 
     // Where do you want to go?
     __u32 dest = addr->sin_addr.s_addr;
-    bpf_printk("lsm: found connect to %d", dest);
+    // bpf_printk("lsm: found connect to %d", dest);
 
-    dynamic_sleep(bpf_get_prandom_u32() % 4000 + 1000);
-    // SLEEP(5000);
+    __u32 milliseconds = bpf_get_prandom_u32() % 4000 + 1000;
+    userspace_blocking_sleep(&milliseconds);
+
+    __u32 x  = bpf_get_prandom_u32();
+    __u32 *y = userspace_blocking_mirror(&x);
+    if (!y)
+        return -EPERM;
+    if (x != *y) {
+        bpf_printk("lsm: NOT EQUAL %u != %u", x, *y);
+    } else {
+        bpf_printk("lsm: EQUAL %u == %u", x, *y);
+    }
 
     if (dest == blockme) {
         bpf_printk("lsm: blocking %d", dest);
