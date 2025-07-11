@@ -37,18 +37,14 @@ func mustMkdirRoot(path string) {
 }
 
 func main() {
-	isDaemon := flag.Bool("daemon", false, "Run as a daemon")
 	isSleeper := flag.Bool("sleeper", false, "Run as a sleeper")
 	flag.Parse()
-	if *isDaemon {
-		os.Exit(daemon())
-	}
 	if *isSleeper {
 		sleeper()
 		return
 	}
 
-	slog.Info("No parameters")
+	os.Exit(cli())
 }
 
 func sleeper() {
@@ -58,8 +54,16 @@ func sleeper() {
 
 var bpfObjs objs.BpfObjects
 
-func daemon() int {
-	slog.Info("Starting cordon daemon")
+func cli() int {
+	slog.Info("Starting cordon")
+
+	originalUID := syscall.Getuid()
+	originalGID := syscall.Getgid()
+
+	if syscall.Geteuid() != 0 {
+		slog.Error("This program must be setuid root")
+		os.Exit(1)
+	}
 
 	mustMkdirRoot(runtimeDirectory)
 	mustMkdirRoot(backingDirectory)
@@ -172,7 +176,29 @@ func daemon() int {
 
 	err = bpfObjs.Pid.Set(uint32(sleeper.Process.Pid))
 	if err != nil {
-		slog.Error("Failed to set PID in eBPF map", "pid", sleeper.Process.Pid, "err", err)
+		slog.Error("Failed to set PID in eBPF", "pid", sleeper.Process.Pid, "err", err)
+		return 1
+	}
+
+	cgroupPath := "/sys/fs/cgroup/cordon1"
+
+	cgroupFile, err := os.Open(cgroupPath)
+	if err != nil {
+		slog.Error("Failed to open cgroup", "path", cgroupPath, "err", err)
+		return 1
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Stat(cgroupPath, &stat); err != nil {
+		slog.Error("Failed to stat cgroup", "path", cgroupPath, "err", err)
+		return 1
+	}
+	cgroupId := stat.Ino
+	slog.Info("cgroup", "ino", cgroupId)
+
+	err = bpfObjs.TargetCgroup.Set(cgroupId)
+	if err != nil {
+		slog.Error("Failed to set target cgroup", "path", cgroupPath, "ino", cgroupId, "err", err)
 		return 1
 	}
 
@@ -231,9 +257,48 @@ func daemon() int {
 	}
 	defer link6.Close()
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		slog.Error("Failed to get cwd", "err", err)
+		return 1
+	}
+
+	childExe, err := exec.LookPath(os.Args[1])
+	if err != nil {
+		slog.Error("Failed to look up path", "exe", os.Args[1])
+		return 1
+	}
+
 	slog.Info("Running...")
 
-	stop := make(chan os.Signal, 5)
+	childPid, err := syscall.ForkExec(childExe, os.Args[1:], &syscall.ProcAttr{
+		Dir:   cwd,
+		Env:   os.Environ(),
+		Files: []uintptr{os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd()},
+		Sys: &syscall.SysProcAttr{
+			Credential: &syscall.Credential{
+				Uid: uint32(originalUID),
+				Gid: uint32(originalGID),
+			},
+			Setpgid:     true,
+			UseCgroupFD: true,
+			CgroupFD:    int(cgroupFile.Fd()),
+		},
+	})
+	if err != nil {
+		slog.Error("Failed to fork exec", "err", err)
+		return 1
+	}
+	slog.Info("Started process", "pid", childPid)
+
+	stop := make(chan os.Signal, 1)
+
+	go func() {
+		var waitStatus syscall.WaitStatus
+		_, _ = syscall.Wait4(childPid, &waitStatus, 0, nil)
+		stop <- os.Interrupt
+	}()
+
 	signal.Notify(stop, os.Interrupt)
 	for {
 		select {

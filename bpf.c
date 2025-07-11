@@ -8,6 +8,8 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+__u64 target_cgroup;
+
 #define EPERM 1
 #define AF_INET 2
 
@@ -29,6 +31,9 @@ DEFINE_USERSPACE(mirror, __u32, __u32)
 
 SEC("lsm.s/socket_connect")
 int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, int addrlen, int ret) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return ret;
+
     // Satisfying "cannot override a denial" rule
     if (ret != 0) {
         return ret;
@@ -47,54 +52,56 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     // bpf_printk("lsm: found connect to %d", dest);
 
     // __u32 milliseconds = bpf_get_prandom_u32() % 4000 + 1000;
-    // userspace_blocking_sleep(&milliseconds);
+    __u32 milliseconds = 2000;
+    userspace_blocking_sleep(&milliseconds);
 
     __u32 x  = bpf_get_prandom_u32();
     __u32 *y = userspace_blocking_mirror(&x);
     if (!y)
         return -EPERM;
     if (x != *y) {
-        // bpf_printk("lsm: NOT EQUAL %u != %u", x, *y);
+        bpf_printk("lsm: NOT EQUAL %u != %u", x, *y);
     } else {
-        // bpf_printk("lsm: EQUAL %u == %u", x, *y);
+        bpf_printk("lsm: EQUAL %u == %u", x, *y);
     }
 
     if (dest == blockme) {
-        // bpf_printk("lsm: blocking %d", dest);
+        bpf_printk("lsm: blocking %d", dest);
         return -EPERM;
     }
     return 0;
 }
 
-// List of sleepable LSM hooks
-// https://github.com/torvalds/linux/blob/v6.15/kernel/bpf/bpf_lsm.c#L286
-// List of all LSM hook function signatures
-// https://github.com/torvalds/linux/blob/v6.15/include/linux/lsm_hook_defs.h
-// File with comments explaining what each LSM hook does
-// https://github.com/torvalds/linux/blob/v6.15/security/security.c
-
 SEC("lsm.s/file_open")
 int BPF_PROG(file_open, struct file *file, int ret) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return ret;
+
     if (ret != 0) {
         return ret;
     }
 
     loff_t size = file->f_inode->i_size;
-    if (size > 4096) {
-        char path[256];
-        int len = bpf_probe_read_str(path, sizeof(path), file->f_path.dentry->d_name.name);
-        if (path[0] == 'm' && path[1] == 'a' && path[2] == 'i' && path[3] == 'n') {
-            // __u32 milliseconds = 1000;
-            // userspace_blocking_sleep(&milliseconds);
-            bpf_printk("file_open: %s", path);
-        }
-    }
+    // if (size > 4096) {
+    char path[256];
+    int len = bpf_probe_read_str(path, sizeof(path), file->f_path.dentry->d_name.name);
+    // if (path[0] == 'm' && path[1] == 'a' && path[2] == 'i' && path[3] == 'n') {
+    //     // __u32 milliseconds = 1000;
+    //     // userspace_blocking_sleep(&milliseconds);
+    //     bpf_printk("file_open: %s", path);
+    // }
+    bpf_path_d_path(&file->f_path, path, sizeof(path));
+    bpf_printk("file_open: %s", path);
+    // }
 
     return 0;
 }
 
 SEC("lsm.s/socket_bind")
 int BPF_PROG(socket_bind, struct socket *sock, struct sockaddr *address, int addrlen, int ret) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return ret;
+
     if (ret != 0) {
         return ret;
     }
@@ -108,13 +115,16 @@ int BPF_PROG(socket_bind, struct socket *sock, struct sockaddr *address, int add
 
 SEC("lsm.s/bprm_check_security")
 int BPF_PROG(bprm_check_security, struct linux_binprm *bprm, int ret) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return ret;
+
     if (ret != 0) {
         return ret;
     }
 
     __u32 milliseconds = 1000;
     // userspace_blocking_sleep(&milliseconds);
-    bpf_printk("bprm_check_security %s", bprm->filename);
+    // bpf_printk("bprm_check_security %s", bprm->filename);
 
     return 0;
 }
@@ -177,6 +187,9 @@ static __always_inline bool is_correlated() {
 
 SEC("lsm.s/cred_prepare")
 int BPF_PROG(cred_prepare, struct cred *new, const struct cred *old, gfp_t gfp, int ret) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return ret;
+
     if (ret != 0) {
         return ret;
     }
@@ -197,6 +210,9 @@ int BPF_PROG(cred_prepare, struct cred *new, const struct cred *old, gfp_t gfp, 
 
 SEC("fentry/__x64_sys_setuid")
 int BPF_PROG(__x64_sys_setuid, uid_t uid) {
+    if (bpf_get_current_cgroup_id() != target_cgroup)
+        return 0;
+
     insert_correlation();
 
     bpf_printk("__x64_sys_setuid %u", uid);

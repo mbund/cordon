@@ -113,8 +113,9 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	Blockme *ebpf.VariableSpec `ebpf:"blockme"`
-	Pid     *ebpf.VariableSpec `ebpf:"pid"`
+	Blockme      *ebpf.VariableSpec `ebpf:"blockme"`
+	Pid          *ebpf.VariableSpec `ebpf:"pid"`
+	TargetCgroup *ebpf.VariableSpec `ebpf:"target_cgroup"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -168,8 +169,9 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	Blockme *ebpf.Variable `ebpf:"blockme"`
-	Pid     *ebpf.Variable `ebpf:"pid"`
+	Blockme      *ebpf.Variable `ebpf:"blockme"`
+	Pid          *ebpf.Variable `ebpf:"pid"`
+	TargetCgroup *ebpf.Variable `ebpf:"target_cgroup"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.
