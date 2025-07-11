@@ -26,6 +26,14 @@ type BpfConnectResponse struct {
 	Verdict bool
 }
 
+type BpfCorrelationContext struct {
+	_    structs.HostLayout
+	Tgid uint32
+	Pid  uint32
+	Gid  uint32
+	Uid  uint32
+}
+
 type BpfCounter struct {
 	_    structs.HostLayout
 	Lock struct {
@@ -77,13 +85,19 @@ type BpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfProgramSpecs struct {
-	RestrictConnect *ebpf.ProgramSpec `ebpf:"restrict_connect"`
+	X64SysSetuid      *ebpf.ProgramSpec `ebpf:"__x64_sys_setuid"`
+	BprmCheckSecurity *ebpf.ProgramSpec `ebpf:"bprm_check_security"`
+	CredPrepare       *ebpf.ProgramSpec `ebpf:"cred_prepare"`
+	FileOpen          *ebpf.ProgramSpec `ebpf:"file_open"`
+	RestrictConnect   *ebpf.ProgramSpec `ebpf:"restrict_connect"`
+	SocketBind        *ebpf.ProgramSpec `ebpf:"socket_bind"`
 }
 
 // BpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
+	CorrelationContexts  *ebpf.MapSpec `ebpf:"correlation_contexts"`
 	CounterMapConnect    *ebpf.MapSpec `ebpf:"counter_map_connect"`
 	CounterMapMirror     *ebpf.MapSpec `ebpf:"counter_map_mirror"`
 	CounterMapSleep      *ebpf.MapSpec `ebpf:"counter_map_sleep"`
@@ -123,6 +137,7 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
+	CorrelationContexts  *ebpf.Map `ebpf:"correlation_contexts"`
 	CounterMapConnect    *ebpf.Map `ebpf:"counter_map_connect"`
 	CounterMapMirror     *ebpf.Map `ebpf:"counter_map_mirror"`
 	CounterMapSleep      *ebpf.Map `ebpf:"counter_map_sleep"`
@@ -136,6 +151,7 @@ type BpfMaps struct {
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
+		m.CorrelationContexts,
 		m.CounterMapConnect,
 		m.CounterMapMirror,
 		m.CounterMapSleep,
@@ -160,12 +176,22 @@ type BpfVariables struct {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfPrograms struct {
-	RestrictConnect *ebpf.Program `ebpf:"restrict_connect"`
+	X64SysSetuid      *ebpf.Program `ebpf:"__x64_sys_setuid"`
+	BprmCheckSecurity *ebpf.Program `ebpf:"bprm_check_security"`
+	CredPrepare       *ebpf.Program `ebpf:"cred_prepare"`
+	FileOpen          *ebpf.Program `ebpf:"file_open"`
+	RestrictConnect   *ebpf.Program `ebpf:"restrict_connect"`
+	SocketBind        *ebpf.Program `ebpf:"socket_bind"`
 }
 
 func (p *BpfPrograms) Close() error {
 	return _BpfClose(
+		p.X64SysSetuid,
+		p.BprmCheckSecurity,
+		p.CredPrepare,
+		p.FileOpen,
 		p.RestrictConnect,
+		p.SocketBind,
 	)
 }
 

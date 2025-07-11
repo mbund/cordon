@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -60,6 +61,10 @@ var bpfObjs objs.BpfObjects
 func daemon() int {
 	slog.Info("Starting cordon daemon")
 
+	mustMkdirRoot(runtimeDirectory)
+	mustMkdirRoot(backingDirectory)
+	mustMkdirRoot(fuseDirectory)
+
 	err := unix.Unmount(fuseDirectory, 0)
 	if err == nil {
 		slog.Warn("Unmounted existing FUSE mount", "path", fuseDirectory)
@@ -77,12 +82,6 @@ func daemon() int {
 			return 1
 		}
 	}
-
-	slog.Info("Creating directories")
-
-	mustMkdirRoot(runtimeDirectory)
-	mustMkdirRoot(backingDirectory)
-	mustMkdirRoot(fuseDirectory)
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -185,6 +184,52 @@ func daemon() int {
 		return 1
 	}
 	defer link1.Close()
+
+	link2, err := link.AttachLSM(link.LSMOptions{
+		Program: bpfObjs.FileOpen,
+	})
+	if err != nil {
+		slog.Error("Failed to attach LSM program", "err", err)
+		return 1
+	}
+	defer link2.Close()
+
+	link3, err := link.AttachLSM(link.LSMOptions{
+		Program: bpfObjs.SocketBind,
+	})
+	if err != nil {
+		slog.Error("Failed to attach LSM program", "err", err)
+		return 1
+	}
+	defer link3.Close()
+
+	link4, err := link.AttachLSM(link.LSMOptions{
+		Program: bpfObjs.BprmCheckSecurity,
+	})
+	if err != nil {
+		slog.Error("Failed to attach LSM program", "err", err)
+		return 1
+	}
+	defer link4.Close()
+
+	link5, err := link.AttachTracing(link.TracingOptions{
+		Program:    bpfObjs.X64SysSetuid,
+		AttachType: ebpf.AttachTraceFEntry,
+	})
+	if err != nil {
+		slog.Error("Failed to attach tracing program", "err", err)
+		return 1
+	}
+	defer link5.Close()
+
+	link6, err := link.AttachLSM(link.LSMOptions{
+		Program: bpfObjs.CredPrepare,
+	})
+	if err != nil {
+		slog.Error("Failed to attach LSM program", "err", err)
+		return 1
+	}
+	defer link6.Close()
 
 	slog.Info("Running...")
 
