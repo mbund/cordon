@@ -113,7 +113,6 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	Blockme      *ebpf.VariableSpec `ebpf:"blockme"`
 	Pid          *ebpf.VariableSpec `ebpf:"pid"`
 	TargetCgroup *ebpf.VariableSpec `ebpf:"target_cgroup"`
 }
@@ -169,7 +168,6 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	Blockme      *ebpf.Variable `ebpf:"blockme"`
 	Pid          *ebpf.Variable `ebpf:"pid"`
 	TargetCgroup *ebpf.Variable `ebpf:"target_cgroup"`
 }

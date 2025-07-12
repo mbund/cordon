@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/creack/pty"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -286,18 +288,28 @@ func cli() int {
 		return 1
 	}
 
+	ptyMaster, ptySlave, err := pty.Open()
+	if err != nil {
+		slog.Error("Failed to open pty", "err", err)
+		return 1
+	}
+	defer ptyMaster.Close()
+	defer ptySlave.Close()
+
 	slog.Info("Running...")
 
 	childPid, err := syscall.ForkExec(childExe, os.Args[1:], &syscall.ProcAttr{
 		Dir:   cwd,
 		Env:   os.Environ(),
-		Files: []uintptr{os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd()},
+		Files: []uintptr{ptySlave.Fd(), ptySlave.Fd(), ptySlave.Fd()},
 		Sys: &syscall.SysProcAttr{
 			Credential: &syscall.Credential{
 				Uid: uint32(originalUID),
 				Gid: uint32(originalGID),
 			},
-			Setpgid:     true,
+			Setsid:      true,
+			Setctty:     true,
+			Ctty:        0,
 			UseCgroupFD: true,
 			CgroupFD:    int(cgroupFile.Fd()),
 		},
@@ -307,6 +319,15 @@ func cli() int {
 		return 1
 	}
 	slog.Info("Started process", "pid", childPid)
+
+	ptySlave.Close()
+
+	go func() {
+		_, _ = io.Copy(os.Stdout, ptyMaster)
+	}()
+	go func() {
+		_, _ = io.Copy(ptyMaster, os.Stdin)
+	}()
 
 	stop := make(chan os.Signal, 1)
 
