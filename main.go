@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,11 +22,7 @@ import (
 	"github.com/mbund/cordon/objs"
 )
 
-const runtimeDirectory = "/var/run/cordon"
-const backingDirectory = runtimeDirectory + "/backing"
-const backingExe = backingDirectory + "/cordon"
-const fuseDirectory = runtimeDirectory + "/fuse"
-const fuseExe = fuseDirectory + "/cordon"
+const runtimeBaseDirectory = "/var/run/cordon"
 
 func mustMkdirRoot(path string) {
 	if err := os.MkdirAll(path, 0700); err != nil {
@@ -65,9 +64,23 @@ func cli() int {
 		os.Exit(1)
 	}
 
-	mustMkdirRoot(runtimeDirectory)
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		slog.Error("Failed to generate random id")
+		return 1
+	}
+	id := hex.EncodeToString(bytes)
+	slog.Info("generated", "id", id)
+
+	backingDirectory := fmt.Sprintf("%s/%s/backing", runtimeBaseDirectory, id)
+	backingExe := fmt.Sprintf("%s/cordon", backingDirectory)
+	fuseDirectory := fmt.Sprintf("%s/%s/fuse", runtimeBaseDirectory, id)
+	fuseExe := fmt.Sprintf("%s/cordon", fuseDirectory)
+
 	mustMkdirRoot(backingDirectory)
 	mustMkdirRoot(fuseDirectory)
+
+	defer os.RemoveAll(fmt.Sprintf("%s/%s", runtimeBaseDirectory, id))
 
 	err := unix.Unmount(fuseDirectory, 0)
 	if err == nil {
@@ -180,7 +193,11 @@ func cli() int {
 		return 1
 	}
 
-	cgroupPath := "/sys/fs/cgroup/cordon1"
+	cgroupPath := fmt.Sprintf("/sys/fs/cgroup/cordon/%s", id)
+	if err := os.MkdirAll(cgroupPath, 0700); err != nil {
+		slog.Error("Failed to create cgroupv2", "path", cgroupPath, "err", err)
+		return 1
+	}
 
 	cgroupFile, err := os.Open(cgroupPath)
 	if err != nil {
@@ -303,7 +320,28 @@ func cli() int {
 	for {
 		select {
 		case <-stop:
-			slog.Info("Received signal, exiting..")
+			slog.Info("Sending kill signal to cgroupv2", "path", cgroupPath)
+
+			err = os.WriteFile(fmt.Sprintf("%s/cgroup.kill", cgroupPath), []byte{'1'}, os.FileMode(0))
+			if err != nil {
+				slog.Error("Failed to kill cgroupv2", "path", cgroupPath, "err", err)
+				return 1
+			}
+
+			slog.Info("Deleting cgroupv2", "path", cgroupPath)
+
+			start := time.Now()
+			for {
+				if err = os.Remove(cgroupPath); err == nil {
+					break
+				}
+
+				if time.Now().After(start.Add(5 * time.Second)) {
+					slog.Error("Failed to delete cgroupv2", "path", cgroupPath, "err", err)
+					return 1
+				}
+			}
+
 			return 0
 		}
 	}
