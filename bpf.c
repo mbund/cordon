@@ -3,6 +3,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
 
 #include "userspace_helper.c"
 
@@ -46,11 +47,16 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     struct sockaddr_in *addr = (struct sockaddr_in *)address;
 
     // Where do you want to go?
-    __u32 dest = addr->sin_addr.s_addr;
-    bpf_printk("lsm: found connect to %pI4", &dest);
+    __u32 dest     = addr->sin_addr.s_addr;
+    struct sock *s = sock->sk;
+    if (s) {
+        __u16 proto = s->sk_protocol;
+        __u16 port  = bpf_htons(addr->sin_port);
+        bpf_printk("lsm: found connect to %pI4 proto=%d port=%d", &dest, proto, port);
+    }
 
     // __u32 milliseconds = bpf_get_prandom_u32() % 4000 + 1000;
-    // __u32 milliseconds = 2000;
+    // __u32 milliseconds = 5000;
     // userspace_blocking_sleep(&milliseconds);
 
     if (dest == 0x01010101) {

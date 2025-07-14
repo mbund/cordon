@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -65,6 +66,16 @@ func cli() int {
 		slog.Error("This program must be setuid root")
 		os.Exit(1)
 	}
+
+	dm := NewDNSManager()
+	dm.StartListeners()
+	defer dm.Close()
+
+	go func() {
+		time.Sleep(5 * time.Second)
+		domain := dm.ReverseLookup(net.ParseIP("142.251.33.78"))
+		slog.Info("found", "domain", domain)
+	}()
 
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
