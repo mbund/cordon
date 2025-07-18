@@ -56,8 +56,8 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     }
 
     // __u32 milliseconds = bpf_get_prandom_u32() % 4000 + 1000;
-    // __u32 milliseconds = 5000;
-    // userspace_blocking_sleep(&milliseconds);
+    __u32 milliseconds = 5000;
+    userspace_blocking_sleep(&milliseconds);
 
     if (dest == 0x01010101) {
         bpf_printk("lsm: blocking %pI4", &dest);

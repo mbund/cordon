@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -231,7 +230,9 @@ func (f *ExecFile) Getxattr(ctx context.Context, attr string, dest []byte) (uint
 				slog.Info("Handling sleep", "idx", idx)
 				return handler(dest, uint32(idx), bpfObjs.RequestArraySleep, func(milliseconds uint32) uint32 {
 					slog.Info("sleep called", "milliseconds", milliseconds)
-					time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+					showDialogChan <- struct{}{}
+					<-closeDialogChan
+					// time.Sleep(time.Duration(milliseconds) * time.Millisecond)
 					return milliseconds
 				})
 			case "mirror":
@@ -301,36 +302,4 @@ func (fh *ExecFileHandle) Release(ctx context.Context) syscall.Errno {
 		return syscall.EIO
 	}
 	return 0
-}
-
-type ExecFSServer struct {
-	server *fuse.Server
-}
-
-func (s *ExecFSServer) Serve(backingDir, mountPoint string) error {
-	root := &ExecFS{
-		backingDir: backingDir,
-	}
-
-	opts := &fs.Options{
-		MountOptions: fuse.MountOptions{
-			DirectMount: true,
-			AllowOther:  true,
-			Name:        "execfs",
-		},
-	}
-
-	server, err := fs.Mount(mountPoint, root, opts)
-	if err != nil {
-		return fmt.Errorf("Failed to mount filesystem: %v", err)
-	}
-	s.server = server
-
-	s.server.Wait()
-
-	return nil
-}
-
-func (s *ExecFSServer) Close() error {
-	return s.server.Unmount()
 }
