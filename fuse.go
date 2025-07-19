@@ -2,23 +2,16 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
-	"unsafe"
 
-	"github.com/cilium/ebpf"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-
-	"github.com/mbund/cordon/objs"
 )
 
 type ExecFS struct {
@@ -182,33 +175,6 @@ var _ = (fs.NodeGetattrer)((*ExecFile)(nil))
 var _ = (fs.NodeOpener)((*ExecFile)(nil))
 var _ = (fs.NodeGetxattrer)((*ExecFile)(nil))
 
-func handler[T, U any](dest []byte, idx uint32, ebpfMap *ebpf.Map, f func(req T) U) (uint32, syscall.Errno) {
-	var req T
-	err := ebpfMap.Lookup(idx, &req)
-	if err != nil {
-		slog.Error("Failed to lookup in map", "idx", idx, "err", err)
-		return 0, syscall.EINVAL
-	}
-
-	ret := f(req)
-
-	rv := reflect.ValueOf(ret)
-	size := int(rv.Type().Size())
-	if len(dest) < size {
-		panic(fmt.Sprintf("destination too small: need %d bytes, have %d", size, len(dest)))
-	}
-	if !rv.CanAddr() {
-		tmp := reflect.New(rv.Type()).Elem()
-		tmp.Set(rv)
-		rv = tmp
-	}
-	ptr := unsafe.Pointer(rv.UnsafeAddr())
-	raw := unsafe.Slice((*byte)(ptr), size)
-	copy(dest, raw)
-
-	return uint32(binary.Size(ret)), 0
-}
-
 func (f *ExecFile) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	slog.Info("Getxattr", "attr", attr)
 	segments := strings.Split(attr, ".")
@@ -216,31 +182,13 @@ func (f *ExecFile) Getxattr(ctx context.Context, attr string, dest []byte) (uint
 	if len(segments) == 3 && segments[0] == "user" {
 		idx, err := strconv.Atoi(segments[2])
 		if err == nil {
-			switch segments[1] {
-			case "connect":
-				slog.Info("Handling connect", "idx", idx)
-				return handler(dest, uint32(idx), bpfObjs.RequestArrayConnect, func(req objs.BpfConnectRequest) objs.BpfConnectResponse {
-					slog.Info("connect called", "daddr", req.Daddr, "dport", req.Dport)
-					return objs.BpfConnectResponse{
-						String:  [16]int8{'h', 'e', 'l', 'l', 'o', '\x00'},
-						Verdict: true,
-					}
-				})
-			case "sleep":
-				slog.Info("Handling sleep", "idx", idx)
-				return handler(dest, uint32(idx), bpfObjs.RequestArraySleep, func(milliseconds uint32) uint32 {
-					slog.Info("sleep called", "milliseconds", milliseconds)
-					showDialogChan <- struct{}{}
-					<-closeDialogChan
-					// time.Sleep(time.Duration(milliseconds) * time.Millisecond)
-					return milliseconds
-				})
-			case "mirror":
-				slog.Info("Handling mirror", "idx", idx)
-				return handler(dest, uint32(idx), bpfObjs.RequestArrayMirror, func(v uint32) uint32 {
-					return v
-				})
+			err := cgroupManager.Freeze()
+			if err != nil {
+				slog.Error("Failed to freeze cgroup", "err", err)
 			}
+			defer cgroupManager.Thaw()
+
+			return handleXAddrRPC(segments[1], dest, uint32(idx))
 		} else {
 			slog.Error("Failed to parse idx", "attr", attr, "err", err)
 		}

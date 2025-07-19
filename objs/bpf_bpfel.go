@@ -17,13 +17,7 @@ type BpfConnectRequest struct {
 	_     structs.HostLayout
 	Daddr uint32
 	Dport uint16
-	_     [2]byte
-}
-
-type BpfConnectResponse struct {
-	_       structs.HostLayout
-	String  [16]int8
-	Verdict bool
+	Proto uint16
 }
 
 type BpfCorrelationContext struct {

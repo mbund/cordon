@@ -4,12 +4,35 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/creack/pty"
 	"golang.org/x/term"
 )
 
 type model struct {
-	mode string
+	prompt      string
+	affirmative string
+	negative    string
+
+	selection bool
+
+	selectedStyle   lipgloss.Style
+	unselectedStyle lipgloss.Style
+	promptStyle     lipgloss.Style
+	borderStyle     lipgloss.Style
+}
+
+func DefaultModel() model {
+	return model{
+		prompt:          "Press Enter to continue...",
+		affirmative:     "Yes",
+		negative:        "No",
+		selection:       false,
+		selectedStyle:   lipgloss.NewStyle().Background(lipgloss.Color("212")).Foreground(lipgloss.Color("230")).Padding(0, 3).Margin(0, 1),
+		unselectedStyle: lipgloss.NewStyle().Background(lipgloss.Color("235")).Foreground(lipgloss.Color("254")).Padding(0, 3).Margin(0, 1),
+		promptStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")).Bold(true),
+		borderStyle:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7571F9")).Padding(1, 2),
+	}
 }
 
 func (model) Init() tea.Cmd {
@@ -23,11 +46,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		switch msg.String() {
-		case "n":
-			m.mode = "n"
+		case "y":
+			m.selection = true
 			return m, nil
-		case "p":
-			m.mode = "p"
+		case "n":
+			m.selection = false
 			return m, nil
 		}
 	}
@@ -35,7 +58,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	return "-----\n🔒 Dialog: Press Enter to continue... " + m.mode + "\n-----"
+	var aff, neg string
+	if m.selection {
+		aff = m.selectedStyle.Render(m.affirmative)
+		neg = m.unselectedStyle.Render(m.negative)
+	} else {
+		aff = m.unselectedStyle.Render(m.affirmative)
+		neg = m.selectedStyle.Render(m.negative)
+	}
+
+	return m.borderStyle.Render(lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.promptStyle.Render(m.prompt)+"\n",
+		lipgloss.JoinHorizontal(lipgloss.Left, aff, neg),
+	))
 }
 
 func setPtySize(ptyFile *os.File, width, height int) error {

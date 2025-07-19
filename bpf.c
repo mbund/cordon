@@ -17,12 +17,9 @@ __u64 target_cgroup;
 struct connect_request {
     __be32 daddr;
     __be16 dport;
+    __u16 proto;
 };
-struct connect_response {
-    char string[16];
-    bool verdict;
-};
-DEFINE_USERSPACE(connect, struct connect_request, struct connect_response)
+DEFINE_USERSPACE(connect, struct connect_request, bool)
 
 DEFINE_USERSPACE(sleep, __u32, __u32)
 
@@ -33,37 +30,35 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     if (bpf_get_current_cgroup_id() != target_cgroup)
         return ret;
 
-    // Satisfying "cannot override a denial" rule
-    if (ret != 0) {
+    if (ret != 0)
         return ret;
-    }
 
-    // Only IPv4 in this example
-    if (address->sa_family != AF_INET) {
+    if (address->sa_family != AF_INET)
         return 0;
-    }
 
-    // Cast the address to an IPv4 socket address
     struct sockaddr_in *addr = (struct sockaddr_in *)address;
 
-    // Where do you want to go?
     __u32 dest     = addr->sin_addr.s_addr;
     struct sock *s = sock->sk;
-    if (s) {
-        __u16 proto = s->sk_protocol;
-        __u16 port  = bpf_htons(addr->sin_port);
-        bpf_printk("lsm: found connect to %pI4 proto=%d port=%d", &dest, proto, port);
-    }
-
-    // __u32 milliseconds = bpf_get_prandom_u32() % 4000 + 1000;
-    __u32 milliseconds = 5000;
-    userspace_blocking_sleep(&milliseconds);
-
-    if (dest == 0x01010101) {
-        bpf_printk("lsm: blocking %pI4", &dest);
+    if (!s)
         return -EPERM;
-    }
-    return 0;
+
+    // __u16 proto = s->sk_protocol;
+    // __u16 port  = bpf_htons(addr->sin_port);
+    // bpf_printk("lsm: found connect to %pI4 proto=%d port=%d", &dest, proto, port);
+
+    struct connect_request req = {
+        .daddr = addr->sin_addr.s_addr,
+        .dport = bpf_htons(addr->sin_port),
+        .proto = s->sk_protocol,
+    };
+    bool *verdict_ptr = userspace_blocking_connect(&req);
+    int verdict       = -EPERM;
+
+    if (verdict_ptr && *verdict_ptr)
+        verdict = 0;
+
+    return verdict;
 }
 
 SEC("lsm.s/file_open")
@@ -101,8 +96,8 @@ int BPF_PROG(socket_bind, struct socket *sock, struct sockaddr *address, int add
     }
 
     __u32 milliseconds = 1000;
-    // userspace_blocking_sleep(&milliseconds);
-    // bpf_printk("socket_open");
+    userspace_blocking_sleep(&milliseconds);
+    // bpf_printk("socket_bind");
 
     return 0;
 }

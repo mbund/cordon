@@ -27,7 +27,20 @@ import (
 	"github.com/mbund/cordon/objs"
 )
 
-const runtimeBaseDirectory = "/var/run/cordon"
+const (
+	runtimeBaseDirectory = "/var/run/cordon"
+	backingDir           = "backing"
+	fuseDir              = "fuse"
+)
+
+var (
+	cgroupManager     *CgroupManager
+	fuseManager       *FUSEManager
+	ebpfManager       *EBPFManager
+	sleeperManager    *SleeperManager
+	subprocessManager *SubprocessManager
+	dnsManager        *DNSManager
+)
 
 func main() {
 	isSleeper := flag.Bool("sleeper", false, "Run as a sleeper")
@@ -45,10 +58,6 @@ func sleeper() {
 	select {}
 }
 
-var bpfObjs objs.BpfObjects
-var backingDirectory string
-var fuseDirectory string
-
 func cli() int {
 	originalUID := syscall.Getuid()
 	originalGID := syscall.Getgid()
@@ -65,9 +74,9 @@ func cli() int {
 	}
 	defer f.Close()
 
-	dm := NewDNSManager()
-	dm.StartListeners()
-	defer dm.Close()
+	dnsManager = NewDNSManager()
+	dnsManager.StartListeners()
+	defer dnsManager.Close()
 
 	id, err := generateId()
 	if err != nil {
@@ -82,21 +91,15 @@ func cli() int {
 	}
 	defer postflight(id)
 
-	var (
-		eg             errgroup.Group
-		cgroupManager  *cgroupManager
-		fuseManager    *fuseManager
-		ebpfManager    *ebpfManager
-		sleeperManager *sleeperManager
-	)
+	var eg errgroup.Group
 	eg.Go(func() error {
 		var eg errgroup.Group
 		eg.Go(func() error {
-			return copySelfExe()
+			return copySelfExe(id)
 		})
 		eg.Go(func() error {
 			var err error
-			fuseManager, err = NewFUSEManager()
+			fuseManager, err = NewFUSEManager(id)
 			return err
 		})
 
@@ -105,12 +108,12 @@ func cli() int {
 			return err
 		}
 
-		sleeperManager, err = NewSleeperManager()
+		sleeperManager, err = NewSleeperManager(id)
 		return err
 	})
 	eg.Go(func() error {
 		var err error
-		cgroupManager, err = newCgroupv2(id)
+		cgroupManager, err = newCgroupManager(id)
 		return err
 	})
 
@@ -142,12 +145,12 @@ func cli() int {
 		return 1
 	}
 
-	childManager, err := NewChildManager(os.Args[1:], originalUID, originalGID, int(cgroupManager.Fd()))
+	subprocessManager, err = NewSubprocessManager(os.Args[1:], originalUID, originalGID, int(cgroupManager.Fd()))
 	if err != nil {
 		slog.Error("Failed to create child manager", "err", err)
 		return 1
 	}
-	defer childManager.Close()
+	defer subprocessManager.Close()
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
@@ -155,8 +158,8 @@ func cli() int {
 	case <-interrupt:
 		slog.Info("Received interrupt signal, killing child process")
 		return 2
-	case code := <-childManager.exited:
-		slog.Info("Child process exited", "pid", childManager.childPid, "code", code)
+	case code := <-subprocessManager.exited:
+		slog.Info("Child process exited", "pid", subprocessManager.childPid, "code", code)
 		return code
 	}
 }
@@ -171,7 +174,7 @@ func generateId() (string, error) {
 }
 
 func preflight(id string) error {
-	backingDirectory = fmt.Sprintf("%s/%s/backing", runtimeBaseDirectory, id)
+	backingDirectory := fmt.Sprintf("%s/%s/%s", runtimeBaseDirectory, id, backingDir)
 	if err := os.MkdirAll(backingDirectory, 0700); err != nil {
 		return fmt.Errorf("failed to create backing directory: %v", err)
 	}
@@ -179,7 +182,7 @@ func preflight(id string) error {
 		return fmt.Errorf("failed to set ownership of backing directory: %v", err)
 	}
 
-	fuseDirectory = fmt.Sprintf("%s/%s/fuse", runtimeBaseDirectory, id)
+	fuseDirectory := fmt.Sprintf("%s/%s/%s", runtimeBaseDirectory, id, fuseDir)
 	if err := os.MkdirAll(fuseDirectory, 0700); err != nil {
 		return fmt.Errorf("failed to create fuse directory: %v", err)
 	}
@@ -213,14 +216,13 @@ func postflight(id string) error {
 }
 
 // cleanup is implicit from postflight
-func copySelfExe() error {
+func copySelfExe(id string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %v", err)
 	}
 
-	backingExe := fmt.Sprintf("%s/cordon", backingDirectory)
-
+	backingExe := fmt.Sprintf("%s/%s/%s/cordon", runtimeBaseDirectory, id, backingDir)
 	slog.Info("Copying self exe", "from", exe, "to", backingExe)
 
 	exeData, err := os.ReadFile(exe)
@@ -235,11 +237,13 @@ func copySelfExe() error {
 	return nil
 }
 
-type fuseManager struct {
+type FUSEManager struct {
 	server *fuse.Server
 }
 
-func NewFUSEManager() (*fuseManager, error) {
+func NewFUSEManager(id string) (*FUSEManager, error) {
+	backingDirectory := fmt.Sprintf("%s/%s/%s", runtimeBaseDirectory, id, backingDir)
+	fuseDirectory := fmt.Sprintf("%s/%s/%s", runtimeBaseDirectory, id, fuseDir)
 	slog.Info("New FUSE manager", "backingDirectory", backingDirectory, "fuseDirectory", fuseDirectory)
 	root := &ExecFS{
 		backingDir: backingDirectory,
@@ -258,12 +262,12 @@ func NewFUSEManager() (*fuseManager, error) {
 		return nil, fmt.Errorf("failed to mount FUSE: %v", err)
 	}
 
-	return &fuseManager{
+	return &FUSEManager{
 		server: server,
 	}, nil
 }
 
-func (fm *fuseManager) Close() error {
+func (fm *FUSEManager) Close() error {
 	if fm == nil || fm.server == nil {
 		return nil
 	}
@@ -284,18 +288,18 @@ func (fm *fuseManager) Close() error {
 		slog.Error("Failed to unmount FUSE", "err", err)
 		return err
 	} else {
-		slog.Info("Unmounted FUSE", "path", fuseDirectory)
+		slog.Info("Unmounted FUSE")
 	}
 
 	return nil
 }
 
-type sleeperManager struct {
+type SleeperManager struct {
 	sleeper *exec.Cmd
 }
 
-func NewSleeperManager() (*sleeperManager, error) {
-	fuseExe := fmt.Sprintf("%s/cordon", fuseDirectory)
+func NewSleeperManager(id string) (*SleeperManager, error) {
+	fuseExe := fmt.Sprintf("%s/%s/%s/cordon", runtimeBaseDirectory, id, fuseDir)
 	sleeper := exec.Command(fuseExe, "--sleeper")
 	if err := sleeper.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start sleeper process: %v", err)
@@ -303,12 +307,12 @@ func NewSleeperManager() (*sleeperManager, error) {
 
 	slog.Info("Started sleeper process", "pid", sleeper.Process.Pid)
 
-	return &sleeperManager{
+	return &SleeperManager{
 		sleeper: sleeper,
 	}, nil
 }
 
-func (sm *sleeperManager) Close() error {
+func (sm *SleeperManager) Close() error {
 	if sm == nil || sm.sleeper == nil {
 		return nil
 	}
@@ -321,17 +325,18 @@ func (sm *sleeperManager) Close() error {
 	return nil
 }
 
-func (sm *sleeperManager) Pid() int {
+func (sm *SleeperManager) Pid() int {
 	return sm.sleeper.Process.Pid
 }
 
-type cgroupManager struct {
-	id   uint64
-	path string
-	file *os.File
+type CgroupManager struct {
+	id             uint64
+	path           string
+	file           *os.File
+	freezeRefcount atomic.Int64
 }
 
-func newCgroupv2(id string) (*cgroupManager, error) {
+func newCgroupManager(id string) (*CgroupManager, error) {
 	cgroupPath := fmt.Sprintf("/sys/fs/cgroup/cordon/%s", id)
 	if err := os.MkdirAll(cgroupPath, 0700); err != nil {
 		slog.Error("Failed to create cgroupv2", "path", cgroupPath, "err", err)
@@ -352,14 +357,14 @@ func newCgroupv2(id string) (*cgroupManager, error) {
 	cgroupId := stat.Ino
 	slog.Info("created cgroup", "ino", cgroupId)
 
-	return &cgroupManager{
+	return &CgroupManager{
 		id:   cgroupId,
 		path: cgroupPath,
 		file: cgroupFile,
 	}, nil
 }
 
-func (c *cgroupManager) Close() error {
+func (c *CgroupManager) Close() error {
 	if c == nil || c.file == nil {
 		return nil
 	}
@@ -394,15 +399,34 @@ func (c *cgroupManager) Close() error {
 	return nil
 }
 
-func (c *cgroupManager) Fd() uintptr {
+func (c *CgroupManager) Freeze() error {
+	v := c.freezeRefcount.Add(1)
+	if v == 1 {
+		slog.Info("Freezing cgroup", "path", c.path)
+		return os.WriteFile(fmt.Sprintf("%s/cgroup.freeze", c.path), []byte{'1'}, os.FileMode(0))
+	}
+	return nil
+}
+
+func (c *CgroupManager) Thaw() error {
+	v := c.freezeRefcount.Add(-1)
+	if v == 0 {
+		slog.Info("Thawing cgroup", "path", c.path)
+		return os.WriteFile(fmt.Sprintf("%s/cgroup.freeze", c.path), []byte{'0'}, os.FileMode(0))
+	}
+	return nil
+}
+
+func (c *CgroupManager) Fd() uintptr {
 	return c.file.Fd()
 }
 
-func (c *cgroupManager) Id() uint64 {
+func (c *CgroupManager) Id() uint64 {
 	return c.id
 }
 
-type ebpfManager struct {
+type EBPFManager struct {
+	bpfObjs           objs.BpfObjects
 	restrictConnect   link.Link
 	fileOpen          link.Link
 	socketBind        link.Link
@@ -411,20 +435,20 @@ type ebpfManager struct {
 	credPrepare       link.Link
 }
 
-func NewEbpfManager() (*ebpfManager, error) {
-	if err := objs.LoadBpfObjects(&bpfObjs, nil); err != nil {
+func NewEbpfManager() (*EBPFManager, error) {
+	var (
+		em       = &EBPFManager{}
+		errgroup errgroup.Group
+	)
+
+	if err := objs.LoadBpfObjects(&em.bpfObjs, nil); err != nil {
 		slog.Error("Failed to load eBPF objects", "err", err)
 		return nil, fmt.Errorf("failed to load eBPF objects: %v", err)
 	}
 
-	var (
-		em       = &ebpfManager{}
-		errgroup errgroup.Group
-	)
-
 	errgroup.Go(func() error {
 		link, err := link.AttachLSM(link.LSMOptions{
-			Program: bpfObjs.RestrictConnect,
+			Program: em.bpfObjs.RestrictConnect,
 		})
 		em.restrictConnect = link
 		return err
@@ -432,7 +456,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 
 	errgroup.Go(func() error {
 		link, err := link.AttachLSM(link.LSMOptions{
-			Program: bpfObjs.FileOpen,
+			Program: em.bpfObjs.FileOpen,
 		})
 		em.fileOpen = link
 		return err
@@ -440,7 +464,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 
 	errgroup.Go(func() error {
 		link, err := link.AttachLSM(link.LSMOptions{
-			Program: bpfObjs.SocketBind,
+			Program: em.bpfObjs.SocketBind,
 		})
 		em.socketBind = link
 		return err
@@ -448,7 +472,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 
 	errgroup.Go(func() error {
 		link, err := link.AttachLSM(link.LSMOptions{
-			Program: bpfObjs.BprmCheckSecurity,
+			Program: em.bpfObjs.BprmCheckSecurity,
 		})
 		em.bprmCheckSecurity = link
 		return err
@@ -456,7 +480,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 
 	errgroup.Go(func() error {
 		link, err := link.AttachTracing(link.TracingOptions{
-			Program:    bpfObjs.X64SysSetuid,
+			Program:    em.bpfObjs.X64SysSetuid,
 			AttachType: ebpf.AttachTraceFEntry,
 		})
 		em.x64SysSetuid = link
@@ -465,7 +489,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 
 	errgroup.Go(func() error {
 		link, err := link.AttachLSM(link.LSMOptions{
-			Program: bpfObjs.CredPrepare,
+			Program: em.bpfObjs.CredPrepare,
 		})
 		em.credPrepare = link
 		return err
@@ -478,7 +502,7 @@ func NewEbpfManager() (*ebpfManager, error) {
 	return em, nil
 }
 
-func (em *ebpfManager) Close() error {
+func (em *EBPFManager) Close() error {
 	if em == nil {
 		return nil
 	}
@@ -531,30 +555,30 @@ func (em *ebpfManager) Close() error {
 		return fmt.Errorf("failed to close eBPF programs: %v", err)
 	}
 
-	if err := bpfObjs.Close(); err != nil {
+	if err := em.bpfObjs.Close(); err != nil {
 		return fmt.Errorf("failed to close eBPF objects: %v", err)
 	}
 
 	return nil
 }
 
-func (em *ebpfManager) SetTargetCgroup(cgroupId uint64) error {
-	if err := bpfObjs.TargetCgroup.Set(cgroupId); err != nil {
+func (em *EBPFManager) SetTargetCgroup(cgroupId uint64) error {
+	if err := em.bpfObjs.TargetCgroup.Set(cgroupId); err != nil {
 		return fmt.Errorf("failed to set target cgroup: %v", err)
 	}
 
 	return nil
 }
 
-func (em *ebpfManager) SetSleeperPid(pid uint32) error {
-	if err := bpfObjs.Pid.Set(pid); err != nil {
+func (em *EBPFManager) SetSleeperPid(pid uint32) error {
+	if err := em.bpfObjs.Pid.Set(pid); err != nil {
 		return fmt.Errorf("failed to set target pid: %v", err)
 	}
 
 	return nil
 }
 
-type childManager struct {
+type SubprocessManager struct {
 	childPid int
 	pty      *os.File
 	exited   chan int
@@ -564,15 +588,14 @@ type childManager struct {
 	oldState    *term.State
 }
 
-func NewChildManager(args []string, originalUID, originalGID, cgroupFD int) (*childManager, error) {
-	cm := &childManager{}
+func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int) (*SubprocessManager, error) {
+	sm := &SubprocessManager{}
 
 	ptyMaster, ptySlave, err := pty.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open pty: %v", err)
 	}
 	defer ptySlave.Close()
-	cm.pty = ptyMaster
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -603,30 +626,30 @@ func NewChildManager(args []string, originalUID, originalGID, cgroupFD int) (*ch
 	if err != nil {
 		return nil, fmt.Errorf("failed to fork exec: %v", err)
 	}
-	cm.childPid = childPid
 
-	cm.pty = ptyMaster
-	cm.setupTty()
+	sm.childPid = childPid
+	sm.pty = ptyMaster
+	sm.setupTty()
 
-	cm.exited = make(chan int, 1)
+	sm.exited = make(chan int, 1)
 	go func() {
 		var waitStatus syscall.WaitStatus
 		_, _ = syscall.Wait4(childPid, &waitStatus, 0, nil)
-		cm.exited <- waitStatus.ExitStatus()
+		sm.exited <- waitStatus.ExitStatus()
 	}()
 
-	return cm, nil
+	return sm, nil
 }
 
-func (cm *childManager) Close() error {
-	if cm == nil || cm.pty == nil {
+func (sm *SubprocessManager) Close() error {
+	if sm == nil || sm.pty == nil {
 		return nil
 	}
 
-	cm.pty.Close()
+	sm.pty.Close()
 
 	stdinFd := int(os.Stdin.Fd())
-	if err := term.Restore(stdinFd, cm.oldState); err != nil {
+	if err := term.Restore(stdinFd, sm.oldState); err != nil {
 		return fmt.Errorf("failed to restore terminal state: %v", err)
 	}
 	if err := unix.SetNonblock(stdinFd, false); err != nil {
@@ -636,16 +659,13 @@ func (cm *childManager) Close() error {
 	return nil
 }
 
-var showDialogChan = make(chan struct{})
-var closeDialogChan = make(chan struct{})
-
-func (cm *childManager) setupTty() error {
+func (sm *SubprocessManager) setupTty() error {
 	width, height, err := getTerminalSize()
 	if err != nil {
 		return fmt.Errorf("failed to get terminal size: %v", err)
 	}
 
-	if err := setPtySize(cm.pty, width, height); err != nil {
+	if err := setPtySize(sm.pty, width, height); err != nil {
 		return fmt.Errorf("failed to set initial PTY size: %v", err)
 	}
 
@@ -654,7 +674,7 @@ func (cm *childManager) setupTty() error {
 	if err != nil {
 		return fmt.Errorf("failed to set raw mode: %v", err)
 	}
-	cm.oldState = oldState
+	sm.oldState = oldState
 
 	if err := unix.SetNonblock(stdinFd, true); err != nil {
 		return fmt.Errorf("failed to set non-blocking stdin: %v", err)
@@ -664,10 +684,10 @@ func (cm *childManager) setupTty() error {
 	signal.Notify(sigCh, syscall.SIGWINCH)
 	go func() {
 		for range sigCh {
-			if !cm.inDialog.Load() {
+			if !sm.inDialog.Load() {
 				width, height, err := getTerminalSize()
 				if err == nil {
-					setPtySize(cm.pty, width, height)
+					setPtySize(sm.pty, width, height)
 				}
 			}
 		}
@@ -683,7 +703,7 @@ func (cm *childManager) setupTty() error {
 				continue
 			}
 
-			if cm.inDialog.Load() {
+			if sm.inDialog.Load() {
 				continue
 			}
 
@@ -692,12 +712,12 @@ func (cm *childManager) setupTty() error {
 				data := buf[:n]
 				dataStr := string(data)
 				if strings.Contains(dataStr, "\x1b[?1049h") {
-					cm.inAltBuffer.Store(true)
+					sm.inAltBuffer.Store(true)
 				} else if strings.Contains(dataStr, "\x1b[?1049l") {
-					cm.inAltBuffer.Store(false)
+					sm.inAltBuffer.Store(false)
 				}
 
-				cm.pty.Write(data)
+				sm.pty.Write(data)
 			}
 		}
 	}()
@@ -705,7 +725,7 @@ func (cm *childManager) setupTty() error {
 	go func() {
 		buf := make([]byte, 1024)
 		for {
-			n, err := cm.pty.Read(buf)
+			n, err := sm.pty.Read(buf)
 			if err != nil {
 				break
 			}
@@ -713,9 +733,9 @@ func (cm *childManager) setupTty() error {
 				data := buf[:n]
 				dataStr := string(data)
 				if strings.Contains(dataStr, "\x1b[?1049h") {
-					cm.inAltBuffer.Store(true)
+					sm.inAltBuffer.Store(true)
 				} else if strings.Contains(dataStr, "\x1b[?1049l") {
-					cm.inAltBuffer.Store(false)
+					sm.inAltBuffer.Store(false)
 				}
 
 				os.Stdout.Write(data)
@@ -723,37 +743,36 @@ func (cm *childManager) setupTty() error {
 		}
 	}()
 
-	go func() {
-		for range showDialogChan {
-			cm.inDialog.Store(true)
-
-			wasInAltBuffer := cm.inAltBuffer.Load()
-
-			if wasInAltBuffer {
-				fmt.Print("\x1b[?1049l")
-			}
-
-			fmt.Print("\x1b7")
-
-			m, err := tea.NewProgram(model{}).Run()
-			if err != nil {
-				slog.Error("Failed to run bubbletea program", "err", err)
-				continue
-			}
-
-			fmt.Printf("\x1b[%dF\x1b[0J", strings.Count(m.View(), "\n"))
-
-			fmt.Print("\x1b8")
-
-			if wasInAltBuffer {
-				fmt.Print("\x1b[?1049h")
-				fmt.Fprint(cm.pty, "\x0c")
-			}
-
-			cm.inDialog.Store(false)
-			closeDialogChan <- struct{}{}
-		}
-	}()
-
 	return nil
+}
+
+func (sm *SubprocessManager) ShowDialog(m tea.Model) (tea.Model, error) {
+	sm.inDialog.Store(true)
+
+	wasInAltBuffer := sm.inAltBuffer.Load()
+
+	if wasInAltBuffer {
+		fmt.Print("\x1b[?1049l")
+	}
+
+	fmt.Print("\x1b7")
+
+	m, err := tea.NewProgram(m).Run()
+	if err != nil {
+		slog.Error("Failed to run bubbletea program", "err", err)
+		return m, err
+	}
+
+	fmt.Printf("\x1b[%dF\x1b[0J", strings.Count(m.View(), "\n"))
+
+	fmt.Print("\x1b8")
+
+	if wasInAltBuffer {
+		fmt.Print("\x1b[?1049h")
+		fmt.Fprint(sm.pty, "\x0c")
+	}
+
+	sm.inDialog.Store(false)
+
+	return m, nil
 }
