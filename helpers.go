@@ -15,6 +15,7 @@ import (
 	"github.com/mbund/cordon/objs"
 )
 
+// https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml
 var protocolMap = map[uint8]string{
 	1:  "icmp",
 	6:  "tcp",

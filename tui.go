@@ -52,6 +52,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.selection = false
 			return m, nil
+		case "up", "down", "left", "right", "h", "j", "k", "l":
+			m.selection = !m.selection
+			return m, nil
 		}
 	}
 	return m, nil

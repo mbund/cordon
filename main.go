@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -591,12 +592,6 @@ type SubprocessManager struct {
 func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int) (*SubprocessManager, error) {
 	sm := &SubprocessManager{}
 
-	ptyMaster, ptySlave, err := pty.Open()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open pty: %v", err)
-	}
-	defer ptySlave.Close()
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cwd: %v", err)
@@ -607,29 +602,98 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		return nil, fmt.Errorf("failed to look up path: %v", err)
 	}
 
-	childPid, err := syscall.ForkExec(childExe, args, &syscall.ProcAttr{
-		Dir:   cwd,
-		Env:   os.Environ(),
-		Files: []uintptr{ptySlave.Fd(), ptySlave.Fd(), ptySlave.Fd()},
-		Sys: &syscall.SysProcAttr{
-			Credential: &syscall.Credential{
-				Uid: uint32(originalUID),
-				Gid: uint32(originalGID),
-			},
-			Setsid:      true,
-			Setctty:     true,
-			Ctty:        0,
-			UseCgroupFD: true,
-			CgroupFD:    cgroupFD,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to fork exec: %v", err)
-	}
+	stdinFd := int(os.Stdin.Fd())
+	isTerm := term.IsTerminal(stdinFd)
 
-	sm.childPid = childPid
-	sm.pty = ptyMaster
-	sm.setupTty()
+	var childPid int
+
+	if isTerm {
+		ptyMaster, ptySlave, err := pty.Open()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open pty: %v", err)
+		}
+		defer ptySlave.Close()
+
+		childPid, err = syscall.ForkExec(childExe, args, &syscall.ProcAttr{
+			Dir:   cwd,
+			Env:   os.Environ(),
+			Files: []uintptr{ptySlave.Fd(), ptySlave.Fd(), ptySlave.Fd()},
+			Sys: &syscall.SysProcAttr{
+				Credential: &syscall.Credential{
+					Uid: uint32(originalUID),
+					Gid: uint32(originalGID),
+				},
+				Setsid:      true,
+				Setctty:     true,
+				UseCgroupFD: true,
+				CgroupFD:    cgroupFD,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to fork exec: %v", err)
+		}
+
+		sm.childPid = childPid
+		sm.pty = ptyMaster
+		sm.setupTty()
+	} else {
+		stdinR, stdinW, err := os.Pipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdin pipe: %v", err)
+		}
+		defer stdinR.Close()
+
+		stdoutR, stdoutW, err := os.Pipe()
+		if err != nil {
+			stdinW.Close()
+			return nil, fmt.Errorf("failed to create stdout pipe: %v", err)
+		}
+		defer stdoutW.Close()
+
+		stderrR, stderrW, err := os.Pipe()
+		if err != nil {
+			stdinW.Close()
+			stdoutR.Close()
+			return nil, fmt.Errorf("failed to create stderr pipe: %v", err)
+		}
+		defer stderrW.Close()
+
+		childPid, err = syscall.ForkExec(childExe, args, &syscall.ProcAttr{
+			Dir:   cwd,
+			Env:   os.Environ(),
+			Files: []uintptr{stdinR.Fd(), stdoutW.Fd(), stderrW.Fd()},
+			Sys: &syscall.SysProcAttr{
+				Credential: &syscall.Credential{
+					Uid: uint32(originalUID),
+					Gid: uint32(originalGID),
+				},
+				UseCgroupFD: true,
+				CgroupFD:    cgroupFD,
+			},
+		})
+		if err != nil {
+			stdinW.Close()
+			stdoutR.Close()
+			stderrR.Close()
+			return nil, fmt.Errorf("failed to fork exec: %v", err)
+		}
+
+		sm.childPid = childPid
+		sm.exited = make(chan int, 1)
+
+		go func() {
+			io.Copy(os.Stdout, stdoutR)
+			stdoutR.Close()
+		}()
+		go func() {
+			io.Copy(os.Stderr, stderrR)
+			stderrR.Close()
+		}()
+		go func() {
+			io.Copy(stdinW, os.Stdin)
+			stdinW.Close()
+		}()
+	}
 
 	sm.exited = make(chan int, 1)
 	go func() {
@@ -648,12 +712,14 @@ func (sm *SubprocessManager) Close() error {
 
 	sm.pty.Close()
 
-	stdinFd := int(os.Stdin.Fd())
-	if err := term.Restore(stdinFd, sm.oldState); err != nil {
-		return fmt.Errorf("failed to restore terminal state: %v", err)
-	}
-	if err := unix.SetNonblock(stdinFd, false); err != nil {
-		return fmt.Errorf("failed to set non-blocking stdin: %v", err)
+	if sm.oldState != nil {
+		stdinFd := int(os.Stdin.Fd())
+		if err := term.Restore(stdinFd, sm.oldState); err != nil {
+			return fmt.Errorf("failed to restore terminal state: %v", err)
+		}
+		if err := unix.SetNonblock(stdinFd, false); err != nil {
+			return fmt.Errorf("failed to set non-blocking stdin: %v", err)
+		}
 	}
 
 	return nil
