@@ -27,7 +27,7 @@ func DefaultModel() model {
 		prompt:          "Press Enter to continue...",
 		affirmative:     "Yes",
 		negative:        "No",
-		selection:       false,
+		selection:       true,
 		selectedStyle:   lipgloss.NewStyle().Background(lipgloss.Color("212")).Foreground(lipgloss.Color("230")).Padding(0, 3).Margin(0, 1),
 		unselectedStyle: lipgloss.NewStyle().Background(lipgloss.Color("235")).Foreground(lipgloss.Color("254")).Padding(0, 3).Margin(0, 1),
 		promptStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")).Bold(true),

@@ -614,6 +614,9 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		}
 		defer ptySlave.Close()
 
+		sm.pty = ptyMaster
+		sm.setupTty()
+
 		childPid, err = syscall.ForkExec(childExe, args, &syscall.ProcAttr{
 			Dir:   cwd,
 			Env:   os.Environ(),
@@ -634,8 +637,6 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		}
 
 		sm.childPid = childPid
-		sm.pty = ptyMaster
-		sm.setupTty()
 	} else {
 		stdinR, stdinW, err := os.Pipe()
 		if err != nil {

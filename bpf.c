@@ -61,27 +61,124 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     return verdict;
 }
 
+static __always_inline int bpf_memcmp_safe(const void *s1, const void *s2, __u32 n) {
+    const unsigned char *p1 = (const unsigned char *)s1;
+    const unsigned char *p2 = (const unsigned char *)s2;
+
+    if (n > 256)
+        n = 256;
+
+    for (__u32 i = 0; i < n; i++) {
+        if ((void *)(p1 + i + 1) > (void *)p1 + 256 || (void *)(p2 + i + 1) > (void *)p2 + 256)
+            break;
+
+        if (p1[i] < p2[i])
+            return -1;
+        if (p1[i] > p2[i])
+            return 1;
+    }
+
+    return 0;
+}
+
+static __always_inline void safe_memcpy(void *dst, const void *src, __u32 len) {
+    __u32 i;
+    for (i = 0; i < len; i++) {
+        ((volatile __u8 *)dst)[i] = ((volatile __u8 *)src)[i];
+    }
+}
+
+struct file_request {
+    char path[128];
+    unsigned int accmode;
+};
+DEFINE_USERSPACE(file, struct file_request, bool)
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, char[128]);
+    __type(value, bool);
+} file_policy_map SEC(".maps");
+
+static __always_inline bool check_file_policy(char *path, __u32 len, unsigned int accmode) {
+    bool *verdict = bpf_map_lookup_elem(&file_policy_map, path);
+    if (!verdict) {
+        struct file_request req = {
+            .accmode = accmode,
+        };
+        safe_memcpy(&req.path, path, sizeof(req.path));
+
+        bool *user_verdict = userspace_blocking_file(&req);
+        if (!user_verdict)
+            return false;
+
+        return *user_verdict != 0;
+    }
+
+    return *verdict;
+}
+
+struct overlay_correlation {
+    loff_t size;
+    struct pt_regs pt_regs;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __type(key, __u64);
+    __type(value, struct overlay_correlation);
+    __uint(max_entries, 1);
+} overlay_correlation_map SEC(".maps");
+
+#define OVERLAYFS_SUPER_MAGIC 0x794c7630
+
 SEC("lsm.s/file_open")
 int BPF_PROG(file_open, struct file *file, int ret) {
     if (bpf_get_current_cgroup_id() != target_cgroup)
         return ret;
 
-    if (ret != 0) {
+    if (ret != 0)
         return ret;
+
+    char path[128];
+    __u32 len = bpf_path_d_path(&file->f_path, path, sizeof(path));
+    bpf_printk("%s", path);
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct overlay_correlation *overlay_correlation = bpf_map_lookup_elem(&overlay_correlation_map, &pid_tgid);
+    if (overlay_correlation) {
+        loff_t size = file->f_inode->i_size;
+        if (overlay_correlation->size != size) {
+            bpf_map_delete_elem(&overlay_correlation_map, &pid_tgid);
+            return -EPERM;
+        }
+        struct pt_regs *pt_regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
+        if (bpf_memcmp_safe(pt_regs, &overlay_correlation->pt_regs, sizeof(*pt_regs))) {
+            bpf_map_delete_elem(&overlay_correlation_map, &pid_tgid);
+            return -EPERM;
+        }
+        bpf_map_delete_elem(&overlay_correlation_map, &pid_tgid);
+        return 0;
     }
 
-    loff_t size = file->f_inode->i_size;
-    // if (size > 4096) {
-    char path[256];
-    int len = bpf_probe_read_str(path, sizeof(path), file->f_path.dentry->d_name.name);
-    // if (path[0] == 'm' && path[1] == 'a' && path[2] == 'i' && path[3] == 'n') {
-    //     // __u32 milliseconds = 1000;
-    //     // userspace_blocking_sleep(&milliseconds);
-    //     bpf_printk("file_open: %s", path);
-    // }
-    bpf_path_d_path(&file->f_path, path, sizeof(path));
-    bpf_printk("file_open: %s", path);
-    // }
+    if (!check_file_policy(path, len, file->f_flags))
+        return -EPERM;
+
+    if (file->f_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
+        struct pt_regs *pt_regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
+        __u64 pid_tgid          = bpf_get_current_pid_tgid();
+        loff_t size             = file->f_inode->i_size;
+
+        struct overlay_correlation overlay_correlation = {
+            .size    = size,
+            .pt_regs = *pt_regs,
+        };
+        bpf_map_update_elem(&overlay_correlation_map, &pid_tgid, &overlay_correlation, BPF_ANY);
+
+        return 0;
+    }
 
     return 0;
 }

@@ -37,6 +37,43 @@ type BpfCounter struct {
 	Next uint32
 }
 
+type BpfFileRequest struct {
+	_       structs.HostLayout
+	Path    [128]int8
+	Accmode uint32
+}
+
+type BpfOverlayCorrelation struct {
+	_      structs.HostLayout
+	Size   int64
+	PtRegs struct {
+		_      structs.HostLayout
+		R15    uint64
+		R14    uint64
+		R13    uint64
+		R12    uint64
+		Bp     uint64
+		Bx     uint64
+		R11    uint64
+		R10    uint64
+		R9     uint64
+		R8     uint64
+		Ax     uint64
+		Cx     uint64
+		Dx     uint64
+		Si     uint64
+		Di     uint64
+		OrigAx uint64
+		Ip     uint64
+		Cs     uint16
+		_      [6]byte
+		Flags  uint64
+		Sp     uint64
+		Ss     uint16
+		_      [6]byte
+	}
+}
+
 // LoadBpf returns the embedded CollectionSpec for Bpf.
 func LoadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -91,16 +128,21 @@ type BpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
-	CorrelationContexts  *ebpf.MapSpec `ebpf:"correlation_contexts"`
-	CounterMapConnect    *ebpf.MapSpec `ebpf:"counter_map_connect"`
-	CounterMapMirror     *ebpf.MapSpec `ebpf:"counter_map_mirror"`
-	CounterMapSleep      *ebpf.MapSpec `ebpf:"counter_map_sleep"`
-	RequestArrayConnect  *ebpf.MapSpec `ebpf:"request_array_connect"`
-	RequestArrayMirror   *ebpf.MapSpec `ebpf:"request_array_mirror"`
-	RequestArraySleep    *ebpf.MapSpec `ebpf:"request_array_sleep"`
-	ResponseArrayConnect *ebpf.MapSpec `ebpf:"response_array_connect"`
-	ResponseArrayMirror  *ebpf.MapSpec `ebpf:"response_array_mirror"`
-	ResponseArraySleep   *ebpf.MapSpec `ebpf:"response_array_sleep"`
+	CorrelationContexts   *ebpf.MapSpec `ebpf:"correlation_contexts"`
+	CounterMapConnect     *ebpf.MapSpec `ebpf:"counter_map_connect"`
+	CounterMapFile        *ebpf.MapSpec `ebpf:"counter_map_file"`
+	CounterMapMirror      *ebpf.MapSpec `ebpf:"counter_map_mirror"`
+	CounterMapSleep       *ebpf.MapSpec `ebpf:"counter_map_sleep"`
+	FilePolicyMap         *ebpf.MapSpec `ebpf:"file_policy_map"`
+	OverlayCorrelationMap *ebpf.MapSpec `ebpf:"overlay_correlation_map"`
+	RequestArrayConnect   *ebpf.MapSpec `ebpf:"request_array_connect"`
+	RequestArrayFile      *ebpf.MapSpec `ebpf:"request_array_file"`
+	RequestArrayMirror    *ebpf.MapSpec `ebpf:"request_array_mirror"`
+	RequestArraySleep     *ebpf.MapSpec `ebpf:"request_array_sleep"`
+	ResponseArrayConnect  *ebpf.MapSpec `ebpf:"response_array_connect"`
+	ResponseArrayFile     *ebpf.MapSpec `ebpf:"response_array_file"`
+	ResponseArrayMirror   *ebpf.MapSpec `ebpf:"response_array_mirror"`
+	ResponseArraySleep    *ebpf.MapSpec `ebpf:"response_array_sleep"`
 }
 
 // BpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -131,28 +173,38 @@ func (o *BpfObjects) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
-	CorrelationContexts  *ebpf.Map `ebpf:"correlation_contexts"`
-	CounterMapConnect    *ebpf.Map `ebpf:"counter_map_connect"`
-	CounterMapMirror     *ebpf.Map `ebpf:"counter_map_mirror"`
-	CounterMapSleep      *ebpf.Map `ebpf:"counter_map_sleep"`
-	RequestArrayConnect  *ebpf.Map `ebpf:"request_array_connect"`
-	RequestArrayMirror   *ebpf.Map `ebpf:"request_array_mirror"`
-	RequestArraySleep    *ebpf.Map `ebpf:"request_array_sleep"`
-	ResponseArrayConnect *ebpf.Map `ebpf:"response_array_connect"`
-	ResponseArrayMirror  *ebpf.Map `ebpf:"response_array_mirror"`
-	ResponseArraySleep   *ebpf.Map `ebpf:"response_array_sleep"`
+	CorrelationContexts   *ebpf.Map `ebpf:"correlation_contexts"`
+	CounterMapConnect     *ebpf.Map `ebpf:"counter_map_connect"`
+	CounterMapFile        *ebpf.Map `ebpf:"counter_map_file"`
+	CounterMapMirror      *ebpf.Map `ebpf:"counter_map_mirror"`
+	CounterMapSleep       *ebpf.Map `ebpf:"counter_map_sleep"`
+	FilePolicyMap         *ebpf.Map `ebpf:"file_policy_map"`
+	OverlayCorrelationMap *ebpf.Map `ebpf:"overlay_correlation_map"`
+	RequestArrayConnect   *ebpf.Map `ebpf:"request_array_connect"`
+	RequestArrayFile      *ebpf.Map `ebpf:"request_array_file"`
+	RequestArrayMirror    *ebpf.Map `ebpf:"request_array_mirror"`
+	RequestArraySleep     *ebpf.Map `ebpf:"request_array_sleep"`
+	ResponseArrayConnect  *ebpf.Map `ebpf:"response_array_connect"`
+	ResponseArrayFile     *ebpf.Map `ebpf:"response_array_file"`
+	ResponseArrayMirror   *ebpf.Map `ebpf:"response_array_mirror"`
+	ResponseArraySleep    *ebpf.Map `ebpf:"response_array_sleep"`
 }
 
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
 		m.CorrelationContexts,
 		m.CounterMapConnect,
+		m.CounterMapFile,
 		m.CounterMapMirror,
 		m.CounterMapSleep,
+		m.FilePolicyMap,
+		m.OverlayCorrelationMap,
 		m.RequestArrayConnect,
+		m.RequestArrayFile,
 		m.RequestArrayMirror,
 		m.RequestArraySleep,
 		m.ResponseArrayConnect,
+		m.ResponseArrayFile,
 		m.ResponseArrayMirror,
 		m.ResponseArraySleep,
 	)

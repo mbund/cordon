@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 
 	"github.com/mbund/cordon/objs"
 )
@@ -94,6 +95,46 @@ func handleConnect(req objs.BpfConnectRequest) bool {
 	return m.selection
 }
 
+func CStringToGoString(cstr [128]int8) string {
+	var bytes []byte
+	for _, b := range cstr {
+		if b == 0 {
+			break
+		}
+		bytes = append(bytes, byte(b))
+	}
+	return string(bytes)
+}
+
+func handleFile(v objs.BpfFileRequest) bool {
+	path := CStringToGoString(v.Path)
+	accessMode := ""
+	switch v.Accmode & unix.O_ACCMODE {
+	case unix.O_RDONLY:
+		accessMode = "reading"
+	case unix.O_WRONLY:
+		accessMode = "writing"
+	case unix.O_RDWR:
+		accessMode = "reading and writing"
+	}
+	slog.Info("file_open", "path", path, "accessMode", accessMode)
+
+	dialog := DefaultModel()
+	dialog.prompt = fmt.Sprintf("Open %s for %s? (y/n)", path, accessMode)
+
+	if subprocessManager == nil {
+		return true
+	}
+	tm, err := subprocessManager.ShowDialog(dialog)
+	if err != nil {
+		slog.Error("Failed to show dialog", "err", err)
+	}
+	m := tm.(model)
+	slog.Info("dialog model", "selected", m.selection)
+
+	return m.selection
+}
+
 func handleSleep(milliseconds uint32) uint32 {
 	slog.Info("sleep called", "milliseconds", milliseconds)
 	time.Sleep(time.Duration(milliseconds) * time.Millisecond)
@@ -116,6 +157,9 @@ func handleXAddrRPC(id string, dest []byte, idx uint32) (uint32, syscall.Errno) 
 	case "mirror":
 		slog.Info("Handling mirror", "idx", idx)
 		return handler(dest, idx, ebpfManager.bpfObjs.RequestArrayMirror, handleMirror)
+	case "file":
+		slog.Info("Handling file", "idx", idx)
+		return handler(dest, idx, ebpfManager.bpfObjs.RequestArrayFile, handleFile)
 	}
 	return 0, syscall.ENODATA
 }
