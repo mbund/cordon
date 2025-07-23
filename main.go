@@ -146,6 +146,15 @@ func cli() int {
 		return 1
 	}
 
+	if err := ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'n', 'i', 'x', '/', 's', 't', 'o', 'r', 'e', '/'}, Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny); err != nil {
+		slog.Error("Failed to update file policy map", "err", err)
+		return 1
+	}
+
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'u', 's', 'r', '/', 'l', 'i', 'b', '6', '4', '/'}, Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 't', 't', 'y'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 'n', 'u', 'l', 'l'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+
 	subprocessManager, err = NewSubprocessManager(os.Args[1:], originalUID, originalGID, int(cgroupManager.Fd()))
 	if err != nil {
 		slog.Error("Failed to create child manager", "err", err)

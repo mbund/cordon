@@ -96,27 +96,46 @@ DEFINE_USERSPACE(file, struct file_request, bool)
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, char[128]);
+    __uint(max_entries, 4096);
+    __type(key, struct file_request);
     __type(value, bool);
 } file_policy_map SEC(".maps");
 
 static __always_inline bool check_file_policy(char *path, __u32 len, unsigned int accmode) {
-    bool *verdict = bpf_map_lookup_elem(&file_policy_map, path);
-    if (!verdict) {
-        struct file_request req = {
-            .accmode = accmode,
-        };
-        safe_memcpy(&req.path, path, sizeof(req.path));
+    struct file_request req = {
+        .accmode = accmode,
+    };
+    safe_memcpy(&req.path, path, 128);
 
-        bool *user_verdict = userspace_blocking_file(&req);
-        if (!user_verdict)
-            return false;
+    bool *verdict = bpf_map_lookup_elem(&file_policy_map, &req);
+    if (verdict)
+        return *verdict;
 
-        return *user_verdict != 0;
+    __u32 max = len - 1;
+    if (max > 127)
+        return false;
+    if (req.path[max] == '/')
+        req.path[max] = '\0';
+
+    for (__u32 i = max; i <= 127; i--) {
+        if (req.path[i] == '/') {
+            bool *verdict = bpf_map_lookup_elem(&file_policy_map, &req);
+            if (verdict)
+                return *verdict;
+        }
+        req.path[i] = '\0';
+        if (i == 0)
+            break;
     }
 
-    return *verdict;
+    safe_memcpy(&req.path, path, sizeof(req.path));
+    bool *user_verdict = userspace_blocking_file(&req);
+    if (!user_verdict)
+        return false;
+
+    bpf_map_update_elem(&file_policy_map, &req, user_verdict, BPF_ANY);
+
+    return *user_verdict != 0;
 }
 
 struct overlay_correlation {
@@ -133,6 +152,14 @@ struct {
 
 #define OVERLAYFS_SUPER_MAGIC 0x794c7630
 
+#define O_ACCMODE 0x3
+
+#define S_IFMT 0170000
+#define S_IFREG 0100000
+#define S_IFDIR 0040000
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+
 SEC("lsm.s/file_open")
 int BPF_PROG(file_open, struct file *file, int ret) {
     if (bpf_get_current_cgroup_id() != target_cgroup)
@@ -141,9 +168,21 @@ int BPF_PROG(file_open, struct file *file, int ret) {
     if (ret != 0)
         return ret;
 
-    char path[128];
-    __u32 len = bpf_path_d_path(&file->f_path, path, sizeof(path));
-    bpf_printk("%s", path);
+    char path[128] = {0};
+    __u32 len      = bpf_path_d_path(&file->f_path, path, sizeof(path));
+
+    for (volatile __u32 i = 0; i < 128; i++) {
+        __u32 x = i + len;
+        if (x > 128)
+            break;
+        path[x] = '\0';
+    }
+
+    if (S_ISDIR(file->f_inode->i_mode) && len <= 128) {
+        __u32 modify_index = len - 1;
+        if (modify_index >= 0 && modify_index < 128)
+            path[modify_index] = '/';
+    }
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
 
@@ -163,12 +202,11 @@ int BPF_PROG(file_open, struct file *file, int ret) {
         return 0;
     }
 
-    if (!check_file_policy(path, len, file->f_flags))
+    if (!check_file_policy(path, len, file->f_flags & O_ACCMODE))
         return -EPERM;
 
     if (file->f_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
         struct pt_regs *pt_regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
-        __u64 pid_tgid          = bpf_get_current_pid_tgid();
         loff_t size             = file->f_inode->i_size;
 
         struct overlay_correlation overlay_correlation = {
