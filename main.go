@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -41,6 +42,7 @@ var (
 	sleeperManager    *SleeperManager
 	subprocessManager *SubprocessManager
 	dnsManager        *DNSManager
+	ttyManager        *TTYManager
 )
 
 func main() {
@@ -154,6 +156,12 @@ func cli() int {
 	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'u', 's', 'r', '/', 'l', 'i', 'b', '6', '4', '/'}, Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
 	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 't', 't', 'y'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
 	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 'n', 'u', 'l', 'l'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+
+	ttyManager, err = NewTTYManager()
+	if err != nil {
+		slog.Error("Failed to create tty manager", "err", err)
+		return 1
+	}
 
 	subprocessManager, err = NewSubprocessManager(os.Args[1:], originalUID, originalGID, int(cgroupManager.Fd()))
 	if err != nil {
@@ -435,6 +443,23 @@ func (c *CgroupManager) Id() uint64 {
 	return c.id
 }
 
+func (c *CgroupManager) SendSignal(signal syscall.Signal) error {
+	procs, err := os.ReadFile(fmt.Sprintf("%s/cgroup.procs", c.path))
+	if err != nil {
+		return fmt.Errorf("failed to read cgroup.procs: %v", err)
+	}
+
+	for pid := range strings.SplitSeq(string(procs), "\n") {
+		pidInt, err := strconv.Atoi(pid)
+		if err != nil {
+			continue
+		}
+		unix.Kill(pidInt, signal)
+	}
+
+	return nil
+}
+
 type EBPFManager struct {
 	bpfObjs           objs.BpfObjects
 	restrictConnect   link.Link
@@ -588,64 +613,119 @@ func (em *EBPFManager) SetSleeperPid(pid uint32) error {
 	return nil
 }
 
-type SubprocessManager struct {
-	childPid int
-	pty      *os.File
-	exited   chan int
-
+type TTYManager struct {
 	inAltBuffer atomic.Bool
 	inDialog    atomic.Bool
-	oldState    *term.State
+	pty         *os.File
+
+	interactive bool
+
+	oldState  *term.State
+	ptyMaster *os.File
+	ptySlave  *os.File
+
+	stdinR  *os.File
+	stdoutW *os.File
+	stderrW *os.File
 }
 
-func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int) (*SubprocessManager, error) {
-	sm := &SubprocessManager{}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cwd: %v", err)
-	}
-
-	childExe, err := exec.LookPath(args[0])
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up path: %v", err)
-	}
+func NewTTYManager() (*TTYManager, error) {
+	tm := &TTYManager{}
 
 	stdinFd := int(os.Stdin.Fd())
 	isTerm := term.IsTerminal(stdinFd)
-
-	var childPid int
+	tm.interactive = isTerm
 
 	if isTerm {
 		ptyMaster, ptySlave, err := pty.Open()
 		if err != nil {
 			return nil, fmt.Errorf("failed to open pty: %v", err)
 		}
-		defer ptySlave.Close()
+		tm.ptyMaster = ptyMaster
+		tm.ptySlave = ptySlave
+		tm.pty = ptyMaster
 
-		sm.pty = ptyMaster
-		sm.setupTty()
-
-		childPid, err = syscall.ForkExec(childExe, args, &syscall.ProcAttr{
-			Dir:   cwd,
-			Env:   os.Environ(),
-			Files: []uintptr{ptySlave.Fd(), ptySlave.Fd(), ptySlave.Fd()},
-			Sys: &syscall.SysProcAttr{
-				Credential: &syscall.Credential{
-					Uid: uint32(originalUID),
-					Gid: uint32(originalGID),
-				},
-				Setsid:      true,
-				Setctty:     true,
-				UseCgroupFD: true,
-				CgroupFD:    cgroupFD,
-			},
-		})
+		width, height, err := getTerminalSize()
 		if err != nil {
-			return nil, fmt.Errorf("failed to fork exec: %v", err)
+			return nil, fmt.Errorf("failed to get terminal size: %v", err)
 		}
 
-		sm.childPid = childPid
+		if err := setPtySize(ptyMaster, width, height); err != nil {
+			return nil, fmt.Errorf("failed to set initial PTY size: %v", err)
+		}
+
+		oldState, err := term.MakeRaw(stdinFd)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set raw mode: %v", err)
+		}
+		tm.oldState = oldState
+
+		if err := unix.SetNonblock(stdinFd, true); err != nil {
+			return nil, fmt.Errorf("failed to set non-blocking stdin: %v", err)
+		}
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGWINCH)
+		go func() {
+			for range sigCh {
+				if !tm.inDialog.Load() {
+					width, height, err := getTerminalSize()
+					if err == nil {
+						setPtySize(tm.pty, width, height)
+					}
+				}
+			}
+		}()
+
+		go func() {
+			pollFd := []unix.PollFd{{Fd: int32(stdinFd), Events: unix.POLLIN}}
+			buf := make([]byte, 1024)
+
+			for {
+				_, err := unix.Poll(pollFd, -1)
+				if err != nil {
+					continue
+				}
+
+				if tm.inDialog.Load() {
+					continue
+				}
+
+				n, err := unix.Read(stdinFd, buf)
+				if err == nil && n > 0 {
+					data := buf[:n]
+					dataStr := string(data)
+					if strings.Contains(dataStr, "\x1b[?1049h") {
+						tm.inAltBuffer.Store(true)
+					} else if strings.Contains(dataStr, "\x1b[?1049l") {
+						tm.inAltBuffer.Store(false)
+					}
+
+					tm.pty.Write(data)
+				}
+			}
+		}()
+
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := tm.pty.Read(buf)
+				if err != nil {
+					break
+				}
+				if n > 0 {
+					data := buf[:n]
+					dataStr := string(data)
+					if strings.Contains(dataStr, "\x1b[?1049h") {
+						tm.inAltBuffer.Store(true)
+					} else if strings.Contains(dataStr, "\x1b[?1049l") {
+						tm.inAltBuffer.Store(false)
+					}
+
+					os.Stdout.Write(data)
+				}
+			}
+		}()
 	} else {
 		stdinR, stdinW, err := os.Pipe()
 		if err != nil {
@@ -668,28 +748,9 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		}
 		defer stderrW.Close()
 
-		childPid, err = syscall.ForkExec(childExe, args, &syscall.ProcAttr{
-			Dir:   cwd,
-			Env:   os.Environ(),
-			Files: []uintptr{stdinR.Fd(), stdoutW.Fd(), stderrW.Fd()},
-			Sys: &syscall.SysProcAttr{
-				Credential: &syscall.Credential{
-					Uid: uint32(originalUID),
-					Gid: uint32(originalGID),
-				},
-				UseCgroupFD: true,
-				CgroupFD:    cgroupFD,
-			},
-		})
-		if err != nil {
-			stdinW.Close()
-			stdoutR.Close()
-			stderrR.Close()
-			return nil, fmt.Errorf("failed to fork exec: %v", err)
-		}
-
-		sm.childPid = childPid
-		sm.exited = make(chan int, 1)
+		tm.stdinR = stdinW
+		tm.stdoutW = stdoutR
+		tm.stderrW = stderrR
 
 		go func() {
 			io.Copy(os.Stdout, stdoutR)
@@ -705,127 +766,25 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		}()
 	}
 
-	sm.exited = make(chan int, 1)
-	go func() {
-		var waitStatus syscall.WaitStatus
-		_, _ = syscall.Wait4(childPid, &waitStatus, 0, nil)
-		sm.exited <- waitStatus.ExitStatus()
-	}()
-
-	return sm, nil
+	return tm, nil
 }
 
-func (sm *SubprocessManager) Close() error {
-	if sm == nil || sm.pty == nil {
-		return nil
+func (tm *TTYManager) Files() []uintptr {
+	if tm.interactive {
+		return []uintptr{tm.ptySlave.Fd(), tm.ptySlave.Fd(), tm.ptySlave.Fd()}
+	} else {
+		return []uintptr{tm.stdinR.Fd(), tm.stdoutW.Fd(), tm.stderrW.Fd()}
 	}
-
-	sm.pty.Close()
-
-	if sm.oldState != nil {
-		stdinFd := int(os.Stdin.Fd())
-		if err := term.Restore(stdinFd, sm.oldState); err != nil {
-			return fmt.Errorf("failed to restore terminal state: %v", err)
-		}
-		if err := unix.SetNonblock(stdinFd, false); err != nil {
-			return fmt.Errorf("failed to set non-blocking stdin: %v", err)
-		}
-	}
-
-	return nil
 }
 
-func (sm *SubprocessManager) setupTty() error {
-	width, height, err := getTerminalSize()
-	if err != nil {
-		return fmt.Errorf("failed to get terminal size: %v", err)
-	}
-
-	if err := setPtySize(sm.pty, width, height); err != nil {
-		return fmt.Errorf("failed to set initial PTY size: %v", err)
-	}
-
-	stdinFd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(stdinFd)
-	if err != nil {
-		return fmt.Errorf("failed to set raw mode: %v", err)
-	}
-	sm.oldState = oldState
-
-	if err := unix.SetNonblock(stdinFd, true); err != nil {
-		return fmt.Errorf("failed to set non-blocking stdin: %v", err)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
-	go func() {
-		for range sigCh {
-			if !sm.inDialog.Load() {
-				width, height, err := getTerminalSize()
-				if err == nil {
-					setPtySize(sm.pty, width, height)
-				}
-			}
-		}
-	}()
-
-	go func() {
-		pollFd := []unix.PollFd{{Fd: int32(stdinFd), Events: unix.POLLIN}}
-		buf := make([]byte, 1024)
-
-		for {
-			_, err := unix.Poll(pollFd, -1)
-			if err != nil {
-				continue
-			}
-
-			if sm.inDialog.Load() {
-				continue
-			}
-
-			n, err := unix.Read(stdinFd, buf)
-			if err == nil && n > 0 {
-				data := buf[:n]
-				dataStr := string(data)
-				if strings.Contains(dataStr, "\x1b[?1049h") {
-					sm.inAltBuffer.Store(true)
-				} else if strings.Contains(dataStr, "\x1b[?1049l") {
-					sm.inAltBuffer.Store(false)
-				}
-
-				sm.pty.Write(data)
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := sm.pty.Read(buf)
-			if err != nil {
-				break
-			}
-			if n > 0 {
-				data := buf[:n]
-				dataStr := string(data)
-				if strings.Contains(dataStr, "\x1b[?1049h") {
-					sm.inAltBuffer.Store(true)
-				} else if strings.Contains(dataStr, "\x1b[?1049l") {
-					sm.inAltBuffer.Store(false)
-				}
-
-				os.Stdout.Write(data)
-			}
-		}
-	}()
-
-	return nil
+func (tm *TTYManager) IsInteractive() bool {
+	return tm.interactive
 }
 
-func (sm *SubprocessManager) ShowDialog(m tea.Model) (tea.Model, error) {
-	sm.inDialog.Store(true)
+func (tm *TTYManager) ShowDialog(m tea.Model) (tea.Model, error) {
+	tm.inDialog.Store(true)
 
-	wasInAltBuffer := sm.inAltBuffer.Load()
+	wasInAltBuffer := tm.inAltBuffer.Load()
 
 	if wasInAltBuffer {
 		fmt.Print("\x1b[?1049l")
@@ -845,10 +804,82 @@ func (sm *SubprocessManager) ShowDialog(m tea.Model) (tea.Model, error) {
 
 	if wasInAltBuffer {
 		fmt.Print("\x1b[?1049h")
-		fmt.Fprint(sm.pty, "\x0c")
+		cgroupManager.SendSignal(syscall.SIGWINCH)
 	}
 
-	sm.inDialog.Store(false)
+	tm.inDialog.Store(false)
 
 	return m, nil
+}
+
+func (tm *TTYManager) Close() error {
+	if tm.interactive {
+		stdinFd := int(os.Stdin.Fd())
+		if err := term.Restore(stdinFd, tm.oldState); err != nil {
+			return fmt.Errorf("failed to restore terminal state: %v", err)
+		}
+		if err := unix.SetNonblock(stdinFd, false); err != nil {
+			return fmt.Errorf("failed to set non-blocking stdin: %v", err)
+		}
+
+		tm.ptyMaster.Close()
+		tm.ptySlave.Close()
+	} else {
+		tm.stdinR.Close()
+		tm.stdoutW.Close()
+		tm.stderrW.Close()
+	}
+
+	return nil
+}
+
+type SubprocessManager struct {
+	childPid int
+	exited   chan int
+}
+
+func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int) (*SubprocessManager, error) {
+	sm := &SubprocessManager{}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cwd: %v", err)
+	}
+
+	childExe, err := exec.LookPath(args[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up path: %v", err)
+	}
+
+	childPid, err := syscall.ForkExec(childExe, args, &syscall.ProcAttr{
+		Dir:   cwd,
+		Env:   os.Environ(),
+		Files: ttyManager.Files(),
+		Sys: &syscall.SysProcAttr{
+			Credential: &syscall.Credential{
+				Uid: uint32(originalUID),
+				Gid: uint32(originalGID),
+			},
+			UseCgroupFD: true,
+			CgroupFD:    cgroupFD,
+			Setsid:      ttyManager.IsInteractive(),
+			Setctty:     ttyManager.IsInteractive(),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fork exec: %v", err)
+	}
+
+	sm.exited = make(chan int, 1)
+	go func() {
+		var waitStatus syscall.WaitStatus
+		_, _ = syscall.Wait4(childPid, &waitStatus, 0, nil)
+		sm.exited <- waitStatus.ExitStatus()
+	}()
+
+	return sm, nil
+}
+
+func (sm *SubprocessManager) Close() error {
+	return nil
 }

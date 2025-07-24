@@ -85,7 +85,7 @@ func handleConnect(req objs.BpfConnectRequest) bool {
 	dialog := DefaultModel()
 	dialog.prompt = fmt.Sprintf("Connect to %s %v on port %s over %s? (y/n)", daddr, possibleHostnames, dport, proto)
 
-	tm, err := subprocessManager.ShowDialog(dialog)
+	tm, err := ttyManager.ShowDialog(dialog)
 	if err != nil {
 		slog.Error("Failed to show dialog", "err", err)
 	}
@@ -122,10 +122,7 @@ func handleFile(v objs.BpfFileRequest) bool {
 	dialog := DefaultModel()
 	dialog.prompt = fmt.Sprintf("Open %s for %s? (y/n)", path, accessMode)
 
-	if subprocessManager == nil {
-		return true
-	}
-	tm, err := subprocessManager.ShowDialog(dialog)
+	tm, err := ttyManager.ShowDialog(dialog)
 	if err != nil {
 		slog.Error("Failed to show dialog", "err", err)
 	}
