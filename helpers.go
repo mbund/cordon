@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"os/exec"
+	"os/user"
 	"reflect"
+	"strconv"
 	"syscall"
 	"time"
 	"unsafe"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 
@@ -95,6 +101,19 @@ func handleConnect(req objs.BpfConnectRequest) bool {
 	return m.selection
 }
 
+func stringToInt8Array(s string) [128]int8 {
+	var result [128]int8
+
+	for i, char := range []byte(s) {
+		if i >= 128 {
+			break
+		}
+		result[i] = int8(char)
+	}
+
+	return result
+}
+
 func CStringToGoString(cstr [128]int8) string {
 	var bytes []byte
 	for _, b := range cstr {
@@ -104,6 +123,199 @@ func CStringToGoString(cstr [128]int8) string {
 		bytes = append(bytes, byte(b))
 	}
 	return string(bytes)
+}
+
+func humanSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%dB", size)
+	}
+	div, exp := unit, 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%c", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+func lsLikeInfo(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+
+	stat := info.Sys().(*syscall.Stat_t)
+
+	mode := info.Mode().String()
+
+	nlink := stat.Nlink
+
+	uid := strconv.Itoa(int(stat.Uid))
+	gid := strconv.Itoa(int(stat.Gid))
+
+	usr, err := user.LookupId(uid)
+	if err != nil {
+		usr = &user.User{Username: uid}
+	}
+	grp, err := user.LookupGroupId(gid)
+	if err != nil {
+		grp = &user.Group{Name: gid}
+	}
+
+	size := humanSize(info.Size())
+
+	timestamp := info.ModTime().Format("Jan _2 15:04 2006")
+
+	return fmt.Sprintf("%s %d %s %s %4s %s",
+		mode, nlink, usr.Username, grp.Name, size, timestamp), nil
+}
+
+func fileLikeInfo(path string) (string, error) {
+	out, err := exec.Command("file", "-b", path).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+type fileModel struct {
+	accessMode  string
+	affirmative string
+	negative    string
+	lslike      string
+	filelike    string
+
+	path         string
+	splitIndexes []int
+	splitIndex   int
+
+	selection bool
+
+	selectedStyle    lipgloss.Style
+	unselectedStyle  lipgloss.Style
+	promptStyle      lipgloss.Style
+	borderStyle      lipgloss.Style
+	highlightStyle   lipgloss.Style
+	unhighlightStyle lipgloss.Style
+}
+
+func DefaultFileModel(path string, accessMode string) fileModel {
+	splitIndexes := make([]int, 0, len(path)/6)
+	for i, c := range path[:len(path)-1] {
+		if c == '/' {
+			splitIndexes = append(splitIndexes, i+1)
+		}
+	}
+	splitIndexes = append(splitIndexes, len(path))
+
+	ls, err := lsLikeInfo(path)
+	if err != nil {
+		slog.Error("failed to get ls like info", "path", path, "err", err)
+	}
+
+	var file string
+	if path[len(path)-1] != '/' {
+		file, err = fileLikeInfo(path)
+		if err != nil {
+			slog.Error("failed to get file like info", "path", path, "err", err)
+		}
+	}
+
+	return fileModel{
+		accessMode:       accessMode,
+		affirmative:      "Yes",
+		negative:         "No",
+		selection:        true,
+		path:             path,
+		splitIndexes:     splitIndexes,
+		splitIndex:       len(splitIndexes) - 1,
+		lslike:           ls,
+		filelike:         file,
+		selectedStyle:    lipgloss.NewStyle().Background(lipgloss.Color("212")).Foreground(lipgloss.Color("232")).Padding(0, 3).Margin(0, 1),
+		unselectedStyle:  lipgloss.NewStyle().Background(lipgloss.Color("235")).Foreground(lipgloss.Color("254")).Padding(0, 3).Margin(0, 1),
+		promptStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")).Bold(true),
+		borderStyle:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7571F9")).Padding(1, 2),
+		highlightStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true),
+		unhighlightStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true),
+	}
+}
+
+func (fileModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m fileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		if msg.Type == tea.KeyEnter {
+			return m, tea.Quit
+		}
+		switch msg.String() {
+		case "y":
+			m.selection = true
+			return m, nil
+		case "n":
+			m.selection = false
+			return m, nil
+		case "left", "right", "h", "l":
+			m.selection = !m.selection
+			return m, nil
+		case "up", "k":
+			if m.splitIndex > 0 {
+				m.splitIndex--
+				ls, err := lsLikeInfo(m.path[:m.splitIndexes[m.splitIndex]])
+				if err != nil {
+					slog.Error("failed to get ls like info", "path", m.path[:m.splitIndexes[m.splitIndex]], "err", err)
+				}
+				m.lslike = ls
+			}
+			return m, nil
+		case "down", "j":
+			if m.splitIndex < len(m.splitIndexes)-1 {
+				m.splitIndex++
+				ls, err := lsLikeInfo(m.path[:m.splitIndexes[m.splitIndex]])
+				if err != nil {
+					slog.Error("failed to get ls like info", "path", m.path[:m.splitIndexes[m.splitIndex]], "err", err)
+				}
+				m.lslike = ls
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m fileModel) View() string {
+	var aff, neg string
+	if m.selection {
+		aff = m.selectedStyle.Render(m.affirmative)
+		neg = m.unselectedStyle.Render(m.negative)
+	} else {
+		aff = m.unselectedStyle.Render(m.affirmative)
+		neg = m.selectedStyle.Render(m.negative)
+	}
+
+	kind := "file"
+	if m.path[m.splitIndexes[m.splitIndex]-1] == '/' {
+		kind = "all files under directory"
+	}
+	prompt := m.promptStyle.Render(fmt.Sprintf("Allow opening %s for ", kind)) + m.highlightStyle.Render(m.accessMode) + m.promptStyle.Render("?")
+
+	path := m.highlightStyle.Render(m.path[:m.splitIndexes[m.splitIndex]]) + m.unhighlightStyle.Render(m.path[m.splitIndexes[m.splitIndex]:])
+
+	file := m.filelike
+	if m.path[m.splitIndexes[m.splitIndex]-1] == '/' {
+		file = ""
+	}
+
+	return m.borderStyle.Render(lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.promptStyle.Render(prompt)+"\n",
+		path+"\n",
+		m.promptStyle.Render(m.lslike),
+		m.promptStyle.Render(file)+"\n",
+		lipgloss.JoinHorizontal(lipgloss.Left, aff, neg),
+	))
 }
 
 func handleFile(v objs.BpfFileRequest) bool {
@@ -119,15 +331,25 @@ func handleFile(v objs.BpfFileRequest) bool {
 	}
 	slog.Info("file_open", "path", path, "accessMode", accessMode)
 
-	dialog := DefaultModel()
-	dialog.prompt = fmt.Sprintf("Open %s for %s? (y/n)", path, accessMode)
+	dialog := DefaultFileModel(path, accessMode)
 
 	tm, err := ttyManager.ShowDialog(dialog)
 	if err != nil {
 		slog.Error("Failed to show dialog", "err", err)
 	}
-	m := tm.(model)
-	slog.Info("dialog model", "selected", m.selection)
+	m := tm.(fileModel)
+
+	selectedPath := m.path[:m.splitIndexes[m.splitIndex]]
+
+	slog.Info("dialog model", "selected", m.selection, "selectedPath", selectedPath)
+
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array(selectedPath), Accmode: v.Accmode}, m.selection, ebpf.UpdateAny)
+
+	if !m.selection {
+		go func() {
+			cgroupManager.Close()
+		}()
+	}
 
 	return m.selection
 }

@@ -133,8 +133,6 @@ static __always_inline bool check_file_policy(char *path, __u32 len, unsigned in
     if (!user_verdict)
         return false;
 
-    bpf_map_update_elem(&file_policy_map, &req, user_verdict, BPF_ANY);
-
     return *user_verdict != 0;
 }
 

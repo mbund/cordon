@@ -28,7 +28,7 @@ func DefaultModel() model {
 		affirmative:     "Yes",
 		negative:        "No",
 		selection:       true,
-		selectedStyle:   lipgloss.NewStyle().Background(lipgloss.Color("212")).Foreground(lipgloss.Color("230")).Padding(0, 3).Margin(0, 1),
+		selectedStyle:   lipgloss.NewStyle().Background(lipgloss.Color("212")).Foreground(lipgloss.Color("232")).Padding(0, 3).Margin(0, 1),
 		unselectedStyle: lipgloss.NewStyle().Background(lipgloss.Color("235")).Foreground(lipgloss.Color("254")).Padding(0, 3).Margin(0, 1),
 		promptStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("#7571F9")).Bold(true),
 		borderStyle:     lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7571F9")).Padding(1, 2),

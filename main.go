@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -148,14 +149,14 @@ func cli() int {
 		return 1
 	}
 
-	if err := ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'n', 'i', 'x', '/', 's', 't', 'o', 'r', 'e', '/'}, Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny); err != nil {
-		slog.Error("Failed to update file policy map", "err", err)
-		return 1
-	}
-
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'u', 's', 'r', '/', 'l', 'i', 'b', '6', '4', '/'}, Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 't', 't', 'y'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: [128]int8{'/', 'd', 'e', 'v', '/', 'n', 'u', 'l', 'l'}, Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/nix/store/"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/usr/lib64/"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_RDWR}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_RDWR}, true, ebpf.UpdateAny)
 
 	ttyManager, err = NewTTYManager()
 	if err != nil {
@@ -850,6 +851,18 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up path: %v", err)
 	}
+
+	absPath, err := filepath.Abs(childExe)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	canonical, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate symlinks for path: %v", err)
+	}
+
+	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array(canonical), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
 
 	childPid, err := syscall.ForkExec(childExe, args, &syscall.ProcAttr{
 		Dir:   cwd,

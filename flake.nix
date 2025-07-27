@@ -35,13 +35,6 @@
             linuxHeaders
             bpftools
           ];
-          # buildInputs = with pkgs; [
-          #   llvmPackages_latest.clang-unwrapped
-          #   llvm
-          #   glibc.dev
-          #   libbpf
-          #   linuxHeaders
-          # ];
         };
       }
     );
