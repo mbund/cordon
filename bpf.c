@@ -4,6 +4,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_core_read.h>
 
 #include "userspace_helper.c"
 
@@ -43,21 +44,20 @@ int BPF_PROG(restrict_connect, struct socket *sock, struct sockaddr *address, in
     if (!s)
         return -EPERM;
 
-    // __u16 proto = s->sk_protocol;
-    // __u16 port  = bpf_htons(addr->sin_port);
-    // bpf_printk("lsm: found connect to %pI4 proto=%d port=%d", &dest, proto, port);
-
-    struct connect_request req = {
+    struct context_connect *req = userspace_blocking_reserve_connect();
+    if (!req)
+        return -EPERM;
+    req->value = (struct connect_request) {
         .daddr = addr->sin_addr.s_addr,
         .dport = bpf_htons(addr->sin_port),
         .proto = s->sk_protocol,
     };
-    bool *verdict_ptr = userspace_blocking_connect(&req);
+    bool *verdict_ptr = userspace_blocking_connect(req);
     int verdict       = -EPERM;
 
     if (verdict_ptr && *verdict_ptr)
         verdict = 0;
-
+    userspace_blocking_end_connect(req);
     return verdict;
 }
 
@@ -88,52 +88,88 @@ static __always_inline void safe_memcpy(void *dst, const void *src, __u32 len) {
     }
 }
 
+#define PATH_MAX 4096
+
 struct file_request {
-    char path[128];
+    char path[PATH_MAX];
     unsigned int accmode;
 };
 DEFINE_USERSPACE(file, struct file_request, bool)
 
+struct file_policy {
+    unsigned int i_ino;
+    dev_t s_dev;
+    unsigned int accmode;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
-    __type(key, struct file_request);
+    __type(key, struct file_policy);
     __type(value, bool);
 } file_policy_map SEC(".maps");
 
-static __always_inline bool check_file_policy(char *path, __u32 len, unsigned int accmode) {
-    struct file_request req = {
-        .accmode = accmode,
-    };
-    safe_memcpy(&req.path, path, 128);
+#define O_ACCMODE 0x3
 
-    bool *verdict = bpf_map_lookup_elem(&file_policy_map, &req);
-    if (verdict)
-        return *verdict;
+static __always_inline bool check_file_policy(struct file *file) {
+    unsigned int accmode = BPF_CORE_READ(file, f_flags) & O_ACCMODE;
+    struct path *path = __builtin_preserve_access_index(&file->f_path);
 
-    __u32 max = len - 1;
-    if (max > 127)
-        return false;
-    if (req.path[max] == '/')
-        req.path[max] = '\0';
+    struct dentry *dentry, *dentry_parent, *dentry_mnt;
+    struct vfsmount *vfsmnt;
+    struct mount *mnt, *mnt_parent;
+    dentry     = BPF_CORE_READ(path, dentry);
+    vfsmnt     = BPF_CORE_READ(path, mnt);
+    mnt        = container_of(vfsmnt, struct mount, mnt);
+    mnt_parent = BPF_CORE_READ(mnt, mnt_parent);
 
-    for (__u32 i = max; i <= 127; i--) {
-        if (req.path[i] == '/') {
-            bool *verdict = bpf_map_lookup_elem(&file_policy_map, &req);
-            if (verdict)
-                return *verdict;
-        }
-        req.path[i] = '\0';
-        if (i == 0)
+    for (__u32 i = 0; i < 128; i++) {
+        const u_char *name        = BPF_CORE_READ(dentry, d_name.name);
+        struct inode *inode       = BPF_CORE_READ(dentry, d_inode);
+        struct file_policy policy = {
+            .i_ino   = BPF_CORE_READ(inode, i_ino),
+            .s_dev   = BPF_CORE_READ(inode, i_sb, s_dev),
+            .accmode = accmode,
+        };
+        bool *verdict = bpf_map_lookup_elem(&file_policy_map, &policy);
+        if (verdict)
+            return *verdict;
+
+        dentry_mnt    = BPF_CORE_READ(vfsmnt, mnt_root);
+        dentry_parent = BPF_CORE_READ(dentry, d_parent);
+
+        if (dentry == dentry_mnt || dentry == dentry_parent) {
+            if (dentry != dentry_mnt) {
+                // We reached root, but not mount root - escaped?
+                break;
+            }
+            if (mnt != mnt_parent) {
+                // We reached root, but not global root - continue with mount point path
+                dentry     = BPF_CORE_READ(mnt, mnt_mountpoint);
+                mnt        = mnt_parent;
+                mnt_parent = BPF_CORE_READ(mnt, mnt_parent);
+                vfsmnt     = __builtin_preserve_access_index(&mnt->mnt);
+                continue;
+            }
+            // Global root - path fully parsed
             break;
+        }
+        dentry = dentry_parent;
+    }
+    struct context_file *req = userspace_blocking_reserve_file();
+    if (!req)
+        return false;
+    bpf_path_d_path(&file->f_path, req->value.path, sizeof(req->value.path));
+    req->value.accmode = accmode;
+    bool *verdict = userspace_blocking_file(req);
+    if (!verdict) {
+        userspace_blocking_end_file(req);
+        return false;
     }
 
-    safe_memcpy(&req.path, path, sizeof(req.path));
-    bool *user_verdict = userspace_blocking_file(&req);
-    if (!user_verdict)
-        return false;
+    userspace_blocking_end_file(req);
 
-    return *user_verdict != 0;
+    return true;
 }
 
 struct overlay_correlation {
@@ -150,8 +186,6 @@ struct {
 
 #define OVERLAYFS_SUPER_MAGIC 0x794c7630
 
-#define O_ACCMODE 0x3
-
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFDIR 0040000
@@ -165,22 +199,6 @@ int BPF_PROG(file_open, struct file *file, int ret) {
 
     if (ret != 0)
         return ret;
-
-    char path[128] = {0};
-    __u32 len      = bpf_path_d_path(&file->f_path, path, sizeof(path));
-
-    for (volatile __u32 i = 0; i < 128; i++) {
-        __u32 x = i + len;
-        if (x > 128)
-            break;
-        path[x] = '\0';
-    }
-
-    if (S_ISDIR(file->f_inode->i_mode) && len <= 128) {
-        __u32 modify_index = len - 1;
-        if (modify_index >= 0 && modify_index < 128)
-            path[modify_index] = '/';
-    }
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
 
@@ -200,7 +218,7 @@ int BPF_PROG(file_open, struct file *file, int ret) {
         return 0;
     }
 
-    if (!check_file_policy(path, len, file->f_flags & O_ACCMODE))
+    if (!check_file_policy(file))
         return -EPERM;
 
     if (file->f_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
@@ -228,8 +246,8 @@ int BPF_PROG(socket_bind, struct socket *sock, struct sockaddr *address, int add
         return ret;
     }
 
-    __u32 milliseconds = 1000;
-    userspace_blocking_sleep(&milliseconds);
+    // __u32 milliseconds = 1000;
+    // userspace_blocking_sleep(&milliseconds);
     // bpf_printk("socket_bind");
 
     return 0;
@@ -244,7 +262,7 @@ int BPF_PROG(bprm_check_security, struct linux_binprm *bprm, int ret) {
         return ret;
     }
 
-    __u32 milliseconds = 1000;
+    // __u32 milliseconds = 1000;
     // userspace_blocking_sleep(&milliseconds);
     // bpf_printk("bprm_check_security %s", bprm->filename);
 
@@ -321,11 +339,11 @@ int BPF_PROG(cred_prepare, struct cred *new, const struct cred *old, gfp_t gfp, 
 
     bpf_printk("cred_prepare %u -> %u", old->uid.val, new->uid.val);
 
-    if (new->uid.val == 0) {
-        __u32 milliseconds = 5000;
-        userspace_blocking_sleep(&milliseconds);
-        return -EPERM;
-    }
+    // if (new->uid.val == 0) {
+    //     __u32 milliseconds = 5000;
+    //     userspace_blocking_sleep(&milliseconds);
+    //     return -EPERM;
+    // }
 
     return 0;
 }

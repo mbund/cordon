@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os/user"
 	"reflect"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -82,10 +84,10 @@ func uint32ToIP(n uint32) net.IP {
 	return net.IP(b)
 }
 
-func handleConnect(req objs.BpfConnectRequest) bool {
-	daddr := uint32ToIP(req.Daddr)
-	proto := protocolKeyword(req.Proto)
-	dport := portKeyword(proto, req.Dport)
+func handleConnect(req objs.BpfContextConnect) bool {
+	daddr := uint32ToIP(req.Value.Daddr)
+	proto := protocolKeyword(req.Value.Proto)
+	dport := portKeyword(proto, req.Value.Dport)
 	possibleHostnames := dnsManager.ReverseLookup(daddr)
 
 	dialog := DefaultModel()
@@ -101,20 +103,7 @@ func handleConnect(req objs.BpfConnectRequest) bool {
 	return m.selection
 }
 
-func stringToInt8Array(s string) [128]int8 {
-	var result [128]int8
-
-	for i, char := range []byte(s) {
-		if i >= 128 {
-			break
-		}
-		result[i] = int8(char)
-	}
-
-	return result
-}
-
-func CStringToGoString(cstr [128]int8) string {
+func CStringToGoString(cstr [4096]int8) string {
 	var bytes []byte
 	for _, b := range cstr {
 		if b == 0 {
@@ -318,10 +307,10 @@ func (m fileModel) View() string {
 	))
 }
 
-func handleFile(v objs.BpfFileRequest) bool {
-	path := CStringToGoString(v.Path)
+func handleFile(v objs.BpfContextFile) bool {
+	path := CStringToGoString(v.Value.Path)
 	accessMode := ""
-	switch v.Accmode & unix.O_ACCMODE {
+	switch v.Value.Accmode & unix.O_ACCMODE {
 	case unix.O_RDONLY:
 		accessMode = "reading"
 	case unix.O_WRONLY:
@@ -343,7 +332,15 @@ func handleFile(v objs.BpfFileRequest) bool {
 
 	slog.Info("dialog model", "selected", m.selection, "selectedPath", selectedPath)
 
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array(selectedPath), Accmode: v.Accmode}, m.selection, ebpf.UpdateAny)
+	policy, err := createFilePolicy(selectedPath, v.Value.Accmode)
+	slog.Info("policy", "ino", policy.I_ino, "s_dev", policy.S_dev)
+	if err != nil {
+		slog.Error("failed to create policy", "err", err)
+	}
+	err = ebpfManager.bpfObjs.FilePolicyMap.Update(policy, m.selection, ebpf.UpdateAny)
+	if err != nil {
+		slog.Error("failed to set policy", "err", err)
+	}
 
 	if !m.selection {
 		go func() {
@@ -408,4 +405,133 @@ func handler[T, U any](dest []byte, idx uint32, ebpfMap *ebpf.Map, f func(req T)
 	copy(dest, raw)
 
 	return uint32(binary.Size(ret)), 0
+}
+
+type MountInfo struct {
+	MountID        int
+	ParentID       int
+	DeviceMajor    int
+	DeviceMinor    int
+	Root           string
+	MountPoint     string
+	MountOptions   string
+	FilesystemType string
+	MountSource    string
+}
+
+func ParseMountInfo() ([]MountInfo, error) {
+	file, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var mounts []MountInfo
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) < 10 {
+			continue
+		}
+
+		deviceField := fields[2]
+		deviceParts := strings.Split(deviceField, ":")
+		if len(deviceParts) != 2 {
+			continue
+		}
+
+		major, err := strconv.Atoi(deviceParts[0])
+		if err != nil {
+			continue
+		}
+
+		minor, err := strconv.Atoi(deviceParts[1])
+		if err != nil {
+			continue
+		}
+
+		mountID, _ := strconv.Atoi(fields[0])
+		parentID, _ := strconv.Atoi(fields[1])
+
+		var fsType, mountSource string
+		dashIndex := -1
+		for i, field := range fields {
+			if field == "-" {
+				dashIndex = i
+				break
+			}
+		}
+
+		if dashIndex > 0 && dashIndex+1 < len(fields) {
+			fsType = fields[dashIndex+1]
+			if dashIndex+2 < len(fields) {
+				mountSource = fields[dashIndex+2]
+			}
+		}
+
+		mount := MountInfo{
+			MountID:        mountID,
+			ParentID:       parentID,
+			DeviceMajor:    major,
+			DeviceMinor:    minor,
+			Root:           fields[3],
+			MountPoint:     fields[4],
+			MountOptions:   fields[5],
+			FilesystemType: fsType,
+			MountSource:    mountSource,
+		}
+
+		mounts = append(mounts, mount)
+	}
+
+	return mounts, scanner.Err()
+}
+
+func GetKernelDeviceID(path string) (uint32, error) {
+	mounts, err := ParseMountInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	var bestMount *MountInfo
+	maxMatchLen := 0
+
+	for _, mount := range mounts {
+		if strings.HasPrefix(path, mount.MountPoint) {
+			if len(mount.MountPoint) > maxMatchLen {
+				bestMount = &mount
+				maxMatchLen = len(mount.MountPoint)
+			}
+		}
+	}
+
+	if bestMount == nil {
+		return 0, fmt.Errorf("no mount found for path %s", path)
+	}
+
+	kernelDeviceID := (uint32(bestMount.DeviceMajor) << 20) | uint32(bestMount.DeviceMinor)
+
+	return kernelDeviceID, nil
+}
+
+func createFilePolicy(path string, accmode uint32) (objs.BpfFilePolicy, error) {
+	kernelDevID, err := GetKernelDeviceID(path)
+	if err != nil {
+		return objs.BpfFilePolicy{}, err
+	}
+
+	var stat syscall.Stat_t
+	err = syscall.Stat(path, &stat)
+	if err != nil {
+		return objs.BpfFilePolicy{}, err
+	}
+
+	return objs.BpfFilePolicy{
+		I_ino:   uint32(stat.Ino),
+		S_dev:   kernelDevID,
+		Accmode: accmode,
+	}, nil
 }

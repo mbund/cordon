@@ -13,11 +13,50 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type BpfConnectRequest struct {
-	_     structs.HostLayout
-	Daddr uint32
-	Dport uint16
-	Proto uint16
+type BpfContextConnect struct {
+	_       structs.HostLayout
+	Lock    uint32
+	_       [4]byte
+	PidTgid uint64
+	N       uint32
+	Value   struct {
+		_     structs.HostLayout
+		Daddr uint32
+		Dport uint16
+		Proto uint16
+	}
+	_ [4]byte
+}
+
+type BpfContextFile struct {
+	_       structs.HostLayout
+	Lock    uint32
+	_       [4]byte
+	PidTgid uint64
+	N       uint32
+	Value   struct {
+		_       structs.HostLayout
+		Path    [4096]int8
+		Accmode uint32
+	}
+}
+
+type BpfContextMirror struct {
+	_       structs.HostLayout
+	Lock    uint32
+	_       [4]byte
+	PidTgid uint64
+	N       uint32
+	Value   uint32
+}
+
+type BpfContextSleep struct {
+	_       structs.HostLayout
+	Lock    uint32
+	_       [4]byte
+	PidTgid uint64
+	N       uint32
+	Value   uint32
 }
 
 type BpfCorrelationContext struct {
@@ -28,18 +67,10 @@ type BpfCorrelationContext struct {
 	Uid  uint32
 }
 
-type BpfCounter struct {
-	_    structs.HostLayout
-	Lock struct {
-		_   structs.HostLayout
-		Val uint32
-	}
-	Next uint32
-}
-
-type BpfFileRequest struct {
+type BpfFilePolicy struct {
 	_       structs.HostLayout
-	Path    [128]int8
+	I_ino   uint32
+	S_dev   uint32
 	Accmode uint32
 }
 
@@ -129,10 +160,6 @@ type BpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfMapSpecs struct {
 	CorrelationContexts   *ebpf.MapSpec `ebpf:"correlation_contexts"`
-	CounterMapConnect     *ebpf.MapSpec `ebpf:"counter_map_connect"`
-	CounterMapFile        *ebpf.MapSpec `ebpf:"counter_map_file"`
-	CounterMapMirror      *ebpf.MapSpec `ebpf:"counter_map_mirror"`
-	CounterMapSleep       *ebpf.MapSpec `ebpf:"counter_map_sleep"`
 	FilePolicyMap         *ebpf.MapSpec `ebpf:"file_policy_map"`
 	OverlayCorrelationMap *ebpf.MapSpec `ebpf:"overlay_correlation_map"`
 	RequestArrayConnect   *ebpf.MapSpec `ebpf:"request_array_connect"`
@@ -149,8 +176,12 @@ type BpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type BpfVariableSpecs struct {
-	Pid          *ebpf.VariableSpec `ebpf:"pid"`
-	TargetCgroup *ebpf.VariableSpec `ebpf:"target_cgroup"`
+	CounterConnect *ebpf.VariableSpec `ebpf:"counter_connect"`
+	CounterFile    *ebpf.VariableSpec `ebpf:"counter_file"`
+	CounterMirror  *ebpf.VariableSpec `ebpf:"counter_mirror"`
+	CounterSleep   *ebpf.VariableSpec `ebpf:"counter_sleep"`
+	Pid            *ebpf.VariableSpec `ebpf:"pid"`
+	TargetCgroup   *ebpf.VariableSpec `ebpf:"target_cgroup"`
 }
 
 // BpfObjects contains all objects after they have been loaded into the kernel.
@@ -174,10 +205,6 @@ func (o *BpfObjects) Close() error {
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfMaps struct {
 	CorrelationContexts   *ebpf.Map `ebpf:"correlation_contexts"`
-	CounterMapConnect     *ebpf.Map `ebpf:"counter_map_connect"`
-	CounterMapFile        *ebpf.Map `ebpf:"counter_map_file"`
-	CounterMapMirror      *ebpf.Map `ebpf:"counter_map_mirror"`
-	CounterMapSleep       *ebpf.Map `ebpf:"counter_map_sleep"`
 	FilePolicyMap         *ebpf.Map `ebpf:"file_policy_map"`
 	OverlayCorrelationMap *ebpf.Map `ebpf:"overlay_correlation_map"`
 	RequestArrayConnect   *ebpf.Map `ebpf:"request_array_connect"`
@@ -193,10 +220,6 @@ type BpfMaps struct {
 func (m *BpfMaps) Close() error {
 	return _BpfClose(
 		m.CorrelationContexts,
-		m.CounterMapConnect,
-		m.CounterMapFile,
-		m.CounterMapMirror,
-		m.CounterMapSleep,
 		m.FilePolicyMap,
 		m.OverlayCorrelationMap,
 		m.RequestArrayConnect,
@@ -214,8 +237,12 @@ func (m *BpfMaps) Close() error {
 //
 // It can be passed to LoadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type BpfVariables struct {
-	Pid          *ebpf.Variable `ebpf:"pid"`
-	TargetCgroup *ebpf.Variable `ebpf:"target_cgroup"`
+	CounterConnect *ebpf.Variable `ebpf:"counter_connect"`
+	CounterFile    *ebpf.Variable `ebpf:"counter_file"`
+	CounterMirror  *ebpf.Variable `ebpf:"counter_mirror"`
+	CounterSleep   *ebpf.Variable `ebpf:"counter_sleep"`
+	Pid            *ebpf.Variable `ebpf:"pid"`
+	TargetCgroup   *ebpf.Variable `ebpf:"target_cgroup"`
 }
 
 // BpfPrograms contains all programs after they have been loaded into the kernel.

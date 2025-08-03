@@ -149,14 +149,54 @@ func cli() int {
 		return 1
 	}
 
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/nix/store/"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/usr/lib64/"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/tty"), Accmode: unix.O_RDWR}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_WRONLY}, true, ebpf.UpdateAny)
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array("/dev/null"), Accmode: unix.O_RDWR}, true, ebpf.UpdateAny)
+	var policy objs.BpfFilePolicy
+	policy, err = createFilePolicy("/nix/store/", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/usr/lib64/", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/tty", unix.O_WRONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/tty", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/tty", unix.O_RDWR)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/null", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/null", unix.O_WRONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/dev/null", unix.O_RDWR)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
 
 	ttyManager, err = NewTTYManager()
 	if err != nil {
@@ -862,7 +902,11 @@ func NewSubprocessManager(args []string, originalUID, originalGID, cgroupFD int)
 		return nil, fmt.Errorf("failed to evaluate symlinks for path: %v", err)
 	}
 
-	ebpfManager.bpfObjs.FilePolicyMap.Update(objs.BpfFileRequest{Path: stringToInt8Array(canonical), Accmode: unix.O_RDONLY}, true, ebpf.UpdateAny)
+	policy, err := createFilePolicy(canonical, unix.O_RDONLY)
+	if err != nil {
+		return nil, fmt.Errorf("failed to crete file policy %v", err)
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
 
 	childPid, err := syscall.ForkExec(childExe, args, &syscall.ProcAttr{
 		Dir:   cwd,
