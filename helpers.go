@@ -318,7 +318,10 @@ func handleFile(v objs.BpfContextFile) bool {
 	case unix.O_RDWR:
 		accessMode = "reading and writing"
 	}
-	slog.Info("file_open", "path", path, "accessMode", accessMode)
+
+	comm := unix.ByteSliceToString(v.Comm[:])
+	exePath := unix.ByteSliceToString(v.ExePath[:])
+	slog.Info("file_open", "path", path, "accessMode", accessMode, "pid", v.PidTgid>>32, "comm", comm, "exe_path", exePath)
 
 	dialog := DefaultFileModel(path, accessMode)
 

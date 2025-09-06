@@ -4,6 +4,7 @@
 #include <bpf/bpf_helpers.h>
 
 #define NUM_RINGS 16
+#define PATH_MAX 4096
 
 s32 pid;
 
@@ -11,6 +12,10 @@ s32 pid;
     struct context_##id { \
         __u32 lock; \
         __u64 pid_tgid; \
+        struct bpf_stack_build_id stack[80]; \
+        int stack_n; \
+        unsigned char comm[TASK_COMM_LEN]; \
+        unsigned char exe_path[PATH_MAX]; \
         __u32 n; \
         request_type value; \
     }; \
@@ -74,6 +79,14 @@ s32 pid;
             return NULL; \
         c->n        = n; \
         c->pid_tgid = bpf_get_current_pid_tgid(); \
+        struct task_struct *task = bpf_get_current_task_btf(); \
+        c->stack_n = bpf_get_task_stack(task, c->stack, sizeof(c->stack), BPF_F_USER_STACK | BPF_F_USER_BUILD_ID); \
+        bpf_get_current_comm(c->comm, sizeof(c->comm)); \
+        struct file *exe_file = bpf_get_task_exe_file(task); \
+        if (!exe_file) \
+            return NULL; \
+        bpf_path_d_path(&exe_file->f_path, (char *)c->exe_path, sizeof(c->exe_path)); \
+        bpf_put_file(exe_file); \
         return c; \
     } \
     static __always_inline response_type *userspace_blocking_##id(struct context_##id *req) { \
@@ -97,8 +110,16 @@ s32 pid;
         } \
         struct bpf_dynptr dynp; \
         long err = bpf_dynptr_from_mem(res, sizeof(response_type), 0, &dynp); \
+        if (err < 0) { \
+            bpf_printk("C n=%d err=%d", req->n, err); \
+            bpf_put_file(file); \
+            bpf_task_release(task); \
+            req->lock = 0; \
+            return NULL; \
+        } \
         err = bpf_get_file_xattr(file, __get_dynamic_attr_##id(req->n), &dynp); \
         if (err < 0) { \
+            bpf_printk("D n=%d err=%d", req->n, err); \
             bpf_put_file(file); \
             bpf_task_release(task); \
             req->lock = 0; \
