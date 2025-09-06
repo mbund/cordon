@@ -198,6 +198,48 @@ func cli() int {
 	}
 	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
 
+	policy, err = createFilePolicy("/usr/lib/locale/", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/usr/share/locale/", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/usr/share/zoneinfo/", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/etc/ld.so.cache", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/proc/sys/kernel/cap_last_cap", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/proc/sys/kernel/ngroups_max", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
+	policy, err = createFilePolicy("/proc/stat", unix.O_RDONLY)
+	if err != nil {
+		return 1
+	}
+	ebpfManager.bpfObjs.FilePolicyMap.Update(policy, true, ebpf.UpdateAny)
+
 	ttyManager, err = NewTTYManager()
 	if err != nil {
 		slog.Error("Failed to create tty manager", "err", err)
@@ -313,6 +355,7 @@ func NewFUSEManager(id string) (*FUSEManager, error) {
 			DirectMount: true,
 			AllowOther:  true,
 			Name:        "execfs",
+			Options:     []string{"context=system_u:object_r:tmp_t:s0"},
 		},
 	}
 

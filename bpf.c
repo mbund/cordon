@@ -15,6 +15,9 @@ __u64 target_cgroup;
 #define EPERM 1
 #define AF_INET 2
 
+#define OVERLAYFS_SUPER_MAGIC 0x794c7630
+#define PID_FS_MAGIC 0x50494446
+
 struct connect_request {
     __be32 daddr;
     __be16 dport;
@@ -87,8 +90,6 @@ static __always_inline void safe_memcpy(void *dst, const void *src, __u32 len) {
         ((volatile __u8 *)dst)[i] = ((volatile __u8 *)src)[i];
     }
 }
-
-#define PATH_MAX 4096
 
 struct file_request {
     char path[PATH_MAX];
@@ -184,8 +185,6 @@ struct {
     __uint(max_entries, 1);
 } overlay_correlation_map SEC(".maps");
 
-#define OVERLAYFS_SUPER_MAGIC 0x794c7630
-
 #define S_IFMT 0170000
 #define S_IFREG 0100000
 #define S_IFDIR 0040000
@@ -199,6 +198,10 @@ int BPF_PROG(file_open, struct file *file, int ret) {
 
     if (ret != 0)
         return ret;
+
+    long unsigned int s_magic = file->f_path.dentry->d_sb->s_magic;
+    if (s_magic == PID_FS_MAGIC)
+        return 0;
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
 
@@ -221,7 +224,7 @@ int BPF_PROG(file_open, struct file *file, int ret) {
     if (!check_file_policy(file))
         return -EPERM;
 
-    if (file->f_path.dentry->d_sb->s_magic == OVERLAYFS_SUPER_MAGIC) {
+    if (s_magic == OVERLAYFS_SUPER_MAGIC) {
         struct pt_regs *pt_regs = (struct pt_regs *)bpf_task_pt_regs(bpf_get_current_task_btf());
         loff_t size             = file->f_inode->i_size;
 

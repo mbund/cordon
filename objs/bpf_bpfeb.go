@@ -18,6 +18,15 @@ type BpfContextConnect struct {
 	Lock    uint32
 	_       [4]byte
 	PidTgid uint64
+	Stack   [80]struct {
+		_       structs.HostLayout
+		Status  int32
+		BuildId [20]uint8
+		Offset  uint64
+	}
+	StackN  int32
+	Comm    [16]uint8
+	ExePath [4096]uint8
 	N       uint32
 	Value   struct {
 		_     structs.HostLayout
@@ -25,7 +34,6 @@ type BpfContextConnect struct {
 		Dport uint16
 		Proto uint16
 	}
-	_ [4]byte
 }
 
 type BpfContextFile struct {
@@ -33,12 +41,22 @@ type BpfContextFile struct {
 	Lock    uint32
 	_       [4]byte
 	PidTgid uint64
+	Stack   [80]struct {
+		_       structs.HostLayout
+		Status  int32
+		BuildId [20]uint8
+		Offset  uint64
+	}
+	StackN  int32
+	Comm    [16]uint8
+	ExePath [4096]uint8
 	N       uint32
 	Value   struct {
 		_       structs.HostLayout
 		Path    [4096]int8
 		Accmode uint32
 	}
+	_ [4]byte
 }
 
 type BpfContextMirror struct {
@@ -46,8 +64,18 @@ type BpfContextMirror struct {
 	Lock    uint32
 	_       [4]byte
 	PidTgid uint64
+	Stack   [80]struct {
+		_       structs.HostLayout
+		Status  int32
+		BuildId [20]uint8
+		Offset  uint64
+	}
+	StackN  int32
+	Comm    [16]uint8
+	ExePath [4096]uint8
 	N       uint32
 	Value   uint32
+	_       [4]byte
 }
 
 type BpfContextSleep struct {
@@ -55,8 +83,18 @@ type BpfContextSleep struct {
 	Lock    uint32
 	_       [4]byte
 	PidTgid uint64
+	Stack   [80]struct {
+		_       structs.HostLayout
+		Status  int32
+		BuildId [20]uint8
+		Offset  uint64
+	}
+	StackN  int32
+	Comm    [16]uint8
+	ExePath [4096]uint8
 	N       uint32
 	Value   uint32
+	_       [4]byte
 }
 
 type BpfCorrelationContext struct {
